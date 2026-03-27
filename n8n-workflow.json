@@ -1,0 +1,78 @@
+{
+  "name": "Hitlist Email Scheduler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hitlist-schedule",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1001-0000-0000-000000000001",
+      "name": "Receive from Hitlist",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "hitlist-schedule"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convert Unix timestamp to ISO datetime for the Wait node\nconst item = $input.first().json;\nconst scheduled_at_iso = new Date(item.scheduled_at * 1000).toISOString();\nreturn [{ json: { ...item, scheduled_at_iso } }];"
+      },
+      "id": "a1b2c3d4-1002-0000-0000-000000000002",
+      "name": "Prepare Timestamp",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.scheduled_at_iso }}",
+        "unit": "specificTime"
+      },
+      "id": "a1b2c3d4-1003-0000-0000-000000000003",
+      "name": "Wait Until Send Time",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [680, 300],
+      "webhookId": "hitlist-wait"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Prepare Timestamp').item.json.to }}",
+        "subject": "={{ $('Prepare Timestamp').item.json.subject }}",
+        "message": "={{ $('Prepare Timestamp').item.json.body }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1004-0000-0000-000000000004",
+      "name": "Send Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Receive from Hitlist": {
+      "main": [
+        [{ "node": "Prepare Timestamp", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Timestamp": {
+      "main": [
+        [{ "node": "Wait Until Send Time", "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait Until Send Time": {
+      "main": [
+        [{ "node": "Send Gmail", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "hitlist-outreach"
+  }
+}

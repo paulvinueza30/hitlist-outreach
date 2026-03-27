@@ -7,6 +7,7 @@ interface Props {
   onAdded: (people: Person[]) => void;
   snovConfigured: boolean;
   existingContacts: Person[];
+  isPage?: boolean;
 }
 
 // Extract a searchable domain from a URL — for ATS/LinkedIn slugs, guess {slug}.com
@@ -57,7 +58,7 @@ function isLinkedInCompanyUrl(s: string) {
 
 type Mode = "snov" | "manual";
 
-export default function AddContactModal({ onClose, onAdded, snovConfigured, existingContacts }: Props) {
+export default function AddContactModal({ onClose, onAdded, snovConfigured, existingContacts, isPage }: Props) {
   const existingEmails = new Set(
     existingContacts.flatMap(c => c.emails?.primaryEmail ? [c.emails.primaryEmail.toLowerCase()] : [])
   );
@@ -75,6 +76,7 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [prospects, setProspects] = useState<SnovProspect[]>([]);
+  const [sourceUsed, setSourceUsed] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [adding, setAdding] = useState(false);
   const [scraping, setScraping] = useState(false);
@@ -135,17 +137,37 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
     setSearchError(null);
     setProspects([]);
     setSelected(new Set());
-    try {
-      const results = await invoke<SnovProspect[]>("snov_search_prospects", { domain: d });
-      if (results.length === 0) {
-        setSearchError("No recruiters found. Try a different domain (e.g. if you got stripe → try stripe.com).");
+    setSourceUsed(null);
+
+    const apis: Array<{ cmd: string; label: string }> = [
+      { cmd: "snov_search_prospects", label: "Snov.io" },
+      { cmd: "hunter_search_prospects", label: "Hunter.io" },
+      { cmd: "prospeo_search_prospects", label: "Prospeo" },
+      { cmd: "apollo_search_prospects", label: "Apollo.io" },
+    ];
+
+    let lastError = "";
+    for (const { cmd, label } of apis) {
+      try {
+        const results = await invoke<SnovProspect[]>(cmd, { domain: d });
+        if (results.length > 0) {
+          setProspects(results);
+          setSourceUsed(label);
+          setSearching(false);
+          return;
+        }
+      } catch (e) {
+        lastError = `${label}: ${String(e)}`;
+        // continue to next API
       }
-      setProspects(results);
-    } catch (e) {
-      setSearchError(String(e));
-    } finally {
-      setSearching(false);
     }
+
+    setSearchError(
+      lastError
+        ? `No results from any API. Last error — ${lastError}`
+        : "No recruiters found across all APIs. Try a different domain."
+    );
+    setSearching(false);
   }, [domain]);
 
   const toggleSelect = (i: number) => {
@@ -239,52 +261,38 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
     }
   }, [firstName, lastName, email, jobTitle, manualCompany, manualDomain, linkedinUrl, manualJobUrl, manualJobLabel, onAdded]);
 
-  return (
-    <div
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-      style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
+  const innerContent = (
+    <>
+      {/* Header */}
       <div style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: 8,
-        width: 560,
-        maxWidth: "95vw",
-        maxHeight: "90vh",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: isPage ? "16px 20px" : "12px 16px",
+        borderBottom: "1px solid var(--border)", flexShrink: 0,
       }}>
-        {/* Header */}
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "12px 16px", borderBottom: "1px solid var(--border)", flexShrink: 0,
-        }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>Add Contacts</span>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            {snovConfigured && (
-              <div style={{ display: "flex", background: "var(--surface2)", borderRadius: 6, border: "1px solid var(--border)", overflow: "hidden" }}>
-                {(["snov", "manual"] as Mode[]).map(m => (
-                  <button key={m} onClick={() => setMode(m)} style={{
-                    padding: "3px 10px", fontSize: 11,
-                    background: mode === m ? "var(--primary)" : "transparent",
-                    color: mode === m ? "#fff" : "var(--text-muted)",
-                    borderRadius: 0,
-                  }}>
-                    {m === "snov" ? "Find Recruiters" : "Manual"}
-                  </button>
-                ))}
-              </div>
-            )}
+        <span style={{ fontWeight: 700, fontSize: isPage ? 16 : 14 }}>Add Contacts</span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {snovConfigured && (
+            <div style={{ display: "flex", background: "var(--surface2)", borderRadius: 6, border: "1px solid var(--border)", overflow: "hidden" }}>
+              {(["snov", "manual"] as Mode[]).map(m => (
+                <button key={m} onClick={() => setMode(m)} style={{
+                  padding: "4px 12px", fontSize: 12,
+                  background: mode === m ? "var(--primary)" : "transparent",
+                  color: mode === m ? "#fff" : "var(--text-muted)",
+                  borderRadius: 0,
+                  fontWeight: mode === m ? 600 : 400,
+                }}>
+                  {m === "snov" ? "Find Recruiters" : "Manual"}
+                </button>
+              ))}
+            </div>
+          )}
+          {!isPage && (
             <button onClick={onClose} style={{ background: "transparent", color: "var(--text-muted)", padding: "0 4px", fontSize: 16 }}>✕</button>
-          </div>
+          )}
         </div>
+      </div>
 
-        <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: isPage ? "16px 20px" : 16 }}>
           {!snovConfigured && mode === "manual" && (
             <div style={{ marginBottom: 12, padding: "8px 12px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", borderRadius: 6, fontSize: 11, color: "var(--text-muted)" }}>
               Add your Snov.io credentials in <strong>Settings</strong> to enable recruiter search from job postings.
@@ -318,7 +326,40 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
               onAdd={handleManualAdd}
             />
           )}
-        </div>
+      </div>
+    </>
+  );
+
+  if (isPage) {
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--surface)" }}>
+        {innerContent}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div style={{
+        background: "var(--surface)",
+        border: "1px solid var(--border)",
+        borderRadius: 10,
+        width: 560,
+        maxWidth: "95vw",
+        maxHeight: "90vh",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.4)",
+      }}>
+        {innerContent}
       </div>
     </div>
   );
@@ -424,6 +465,11 @@ function SnovPanel({
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>
               {prospects.length} RECRUITERS FOUND — select to add
+              {sourceUsed && (
+                <span style={{ marginLeft: 6, padding: "1px 7px", borderRadius: 10, background: "color-mix(in srgb, var(--primary) 12%, var(--surface2))", color: "var(--primary)", fontSize: 10, fontWeight: 600 }}>
+                  via {sourceUsed}
+                </span>
+              )}
             </span>
             <div style={{ display: "flex", gap: 6 }}>
               <button

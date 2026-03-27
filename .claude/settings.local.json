@@ -3,7 +3,9 @@
     "allow": [
       "Bash(curl:*)",
       "Bash(env:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(npm run:*)",
+      "Bash(/home/paulmv/.local/share/mise/shims/node:*)"
     ]
   }
 }

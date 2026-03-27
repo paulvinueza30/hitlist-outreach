@@ -97,8 +97,14 @@ pub struct AppConfig {
     pub google_client_secret: String,
     pub gmail_connected: bool,
     pub apollo_api_key: String,
+    pub hunter_api_key: String,
+    pub prospeo_api_key: String,
     pub snov_client_id: String,
     pub snov_client_secret: String,
+    pub n8n_webhook_url: String,
+    pub ai_samples_count: usize,
+    pub follow_up_days: usize,
+    pub follow_up_system_prompt: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -141,11 +147,46 @@ pub struct ApolloPersonResult {
     pub organization_name: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScheduledEmail {
+    pub id: String,
+    pub contact_id: String,
+    pub contact_name: String,
+    pub contact_email: String,
+    pub contact_company: Option<String>,
+    pub subject: String,
+    pub body: String,
+    pub scheduled_at: i64, // Unix seconds
+    pub status: String,    // "pending" | "sent" | "failed"
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AiPromptPreview {
+    pub system_prompt: String,
+    pub user_message: String,
+    pub model: String,
+    pub provider: String,
+    pub endpoint: String,
+    pub samples_count: usize,
+}
+
 // ============================================================
 // Constants
 // ============================================================
 
 pub const DEFAULT_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxZDlkNjlkYS1iOGJlLTRlNTctOTVlZS1iYjI3MTQwN2Q1ZmYiLCJ0eXBlIjoiQVBJX0tFWSIsIndvcmtzcGFjZUlkIjoiMWQ5ZDY5ZGEtYjhiZS00ZTU3LTk1ZWUtYmIyNzE0MDdkNWZmIiwiaWF0IjoxNzY5NDg1NjkzLCJleHAiOjQ5MjI5OTkyOTIsImp0aSI6IjJjN2YyOGEwLTY3NDAtNGM4Mi04YTY3LWY4NDMzNGQ0ZGMyMSJ9.6Y4gGwoH8U8X0Ar-voGpdgxj9DsoUSGQ1v6kXJ3Ee7M";
+
+pub const DEFAULT_FOLLOW_UP_SYSTEM_PROMPT: &str = "You are helping Paul Vinueza write short, natural follow-up emails to recruiters who haven't replied.
+
+Guidelines:
+- Keep follow-ups under 80 words — shorter is better
+- Reference the original outreach briefly (\"just wanted to follow up on my previous note\")
+- Don't sound desperate or apologetic
+- Add a small new detail, question, or angle — don't just say \"following up\"
+- One clear, low-friction ask: quick call, 10-min chat, or just to check if the role is still open
+- Avoid: \"I just wanted to\", \"I hope this finds you\", \"circle back\", \"touch base\"
+- Sound human, not like an automated drip campaign
+- No subject line needed — reply to the original thread";
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are helping Paul Vinueza write personalized cold outreach emails to recruiters.
 
@@ -225,6 +266,31 @@ fn save_writing_samples_list(app: &AppHandle, samples: &[String]) -> Result<(), 
     Ok(())
 }
 
+fn follow_up_samples_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join("follow_up_samples.json"))
+}
+
+pub fn load_follow_up_samples(app: &AppHandle) -> Vec<String> {
+    let path = match follow_up_samples_path(app) {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+    let data = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str::<Vec<String>>(&data).unwrap_or_default()
+}
+
+fn save_follow_up_samples_list(app: &AppHandle, samples: &[String]) -> Result<(), String> {
+    let path = follow_up_samples_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(samples).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn pick_random_samples(samples: &[String], n: usize) -> Vec<String> {
     if samples.len() <= n {
         return samples.to_vec();
@@ -249,6 +315,37 @@ pub fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+pub fn gen_id() -> String {
+    let ts = unix_now() as u64;
+    let nano = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    format!("{:x}{:x}", ts, nano)
+}
+
+/// Convert Unix seconds to ISO 8601 string (UTC) without external crates.
+pub fn unix_to_iso(ts: i64) -> String {
+    let secs = ts as u64;
+    let time_of_day = secs % 86400;
+    let days = (secs / 86400) as i64;
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+    // Civil date algorithm: https://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m, d, hh, mm, ss)
 }
 
 // ============================================================
@@ -739,9 +836,18 @@ pub struct SnovProspect {
     pub position: String,
     pub linkedin_url: String,
     pub email_start_url: String,
+    pub email: Option<String>,
+    pub source: Option<String>,
     pub city: Option<String>,
     pub country: Option<String>,
     pub seniority: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct QuotaInfo {
+    pub left: i64,
+    pub used: i64,
+    pub label: String,
 }
 
 // ============================================================
@@ -832,8 +938,19 @@ pub mod commands {
             google_client_secret: store_get(&app, "google_client_secret").unwrap_or_default(),
             gmail_connected: store_get(&app, "gmail_access_token").is_some(),
             apollo_api_key: store_get(&app, "apollo_api_key").unwrap_or_default(),
+            hunter_api_key: store_get(&app, "hunter_api_key").unwrap_or_default(),
+            prospeo_api_key: store_get(&app, "prospeo_api_key").unwrap_or_default(),
             snov_client_id: store_get(&app, "snov_client_id").unwrap_or_default(),
             snov_client_secret: store_get(&app, "snov_client_secret").unwrap_or_default(),
+            n8n_webhook_url: store_get(&app, "n8n_webhook_url").unwrap_or_default(),
+            ai_samples_count: store_get(&app, "ai_samples_count")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            follow_up_days: store_get(&app, "follow_up_days")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(7),
+            follow_up_system_prompt: store_get(&app, "follow_up_system_prompt")
+                .unwrap_or_else(|| DEFAULT_FOLLOW_UP_SYSTEM_PROMPT.to_string()),
         })
     }
 
@@ -845,6 +962,13 @@ pub mod commands {
         client_secret: String,
         snov_client_id: String,
         snov_client_secret: String,
+        hunter_api_key: String,
+        apollo_api_key: String,
+        prospeo_api_key: String,
+        n8n_webhook_url: String,
+        ai_samples_count: usize,
+        follow_up_days: usize,
+        follow_up_system_prompt: String,
     ) -> Result<(), String> {
         store_set(&app, "twenty_api_key", &api_key)?;
         store_set(&app, "google_client_id", &client_id)?;
@@ -855,6 +979,19 @@ pub mod commands {
         if !snov_client_secret.is_empty() {
             store_set(&app, "snov_client_secret", &snov_client_secret)?;
         }
+        if !hunter_api_key.is_empty() {
+            store_set(&app, "hunter_api_key", &hunter_api_key)?;
+        }
+        if !apollo_api_key.is_empty() {
+            store_set(&app, "apollo_api_key", &apollo_api_key)?;
+        }
+        if !prospeo_api_key.is_empty() {
+            store_set(&app, "prospeo_api_key", &prospeo_api_key)?;
+        }
+        store_set(&app, "n8n_webhook_url", &n8n_webhook_url)?;
+        store_set(&app, "ai_samples_count", &ai_samples_count.to_string())?;
+        store_set(&app, "follow_up_days", &follow_up_days.to_string())?;
+        store_set(&app, "follow_up_system_prompt", &follow_up_system_prompt)?;
         Ok(())
     }
 
@@ -1156,6 +1293,407 @@ pub mod commands {
     #[tauri::command]
     pub async fn get_writing_sample_count(app: AppHandle) -> Result<usize, String> {
         Ok(load_writing_samples(&app).len())
+    }
+
+    #[tauri::command]
+    pub async fn get_writing_samples(app: AppHandle) -> Result<Vec<String>, String> {
+        Ok(load_writing_samples(&app))
+    }
+
+    #[tauri::command]
+    pub async fn delete_writing_sample(app: AppHandle, index: usize) -> Result<(), String> {
+        let mut samples = load_writing_samples(&app);
+        if index < samples.len() {
+            samples.remove(index);
+            save_writing_samples_list(&app, &samples)?;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn save_resume_text(app: AppHandle, text: String) -> Result<(), String> {
+        store_set(&app, "resume_text", &text)
+    }
+
+    #[tauri::command]
+    pub async fn get_resume_text(app: AppHandle) -> Result<String, String> {
+        Ok(store_get(&app, "resume_text").unwrap_or_default())
+    }
+
+    #[tauri::command]
+    pub async fn parse_resume(app: AppHandle, text: String) -> Result<String, String> {
+        let provider = store_get(&app, "ai_provider").unwrap_or_else(|| "claude".to_string());
+        let api_key = store_get(&app, "ai_api_key")
+            .ok_or_else(|| "No AI API key configured. Add it in Settings → AI.".to_string())?;
+        if api_key.is_empty() {
+            return Err("No AI API key configured. Add it in Settings → AI.".to_string());
+        }
+        let model = store_get(&app, "ai_model")
+            .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
+        let system = "You are a resume parser. Extract key information accurately and return valid JSON only.";
+        let truncated: String = text.chars().take(8000).collect();
+        let prompt = format!(
+            "Parse this resume and return a JSON object with these exact fields:\n{{\"name\": \"full name\", \"title\": \"current/most recent job title\", \"summary\": \"2-3 sentence professional summary\", \"skills\": [\"skill1\", \"skill2\"], \"experience\": [\"Most Recent Title at Company (Year)\", \"Previous Title at Company\"], \"education\": \"Degree, School\"}}\n\nResume:\n{}\n\nReturn ONLY valid JSON, no markdown, no explanation.",
+            truncated
+        );
+        call_ai_api(&provider, &api_key, &model, system, &prompt).await
+    }
+
+    #[tauri::command]
+    pub async fn update_person_fields(
+        app: AppHandle,
+        id: String,
+        email: Option<String>,
+        linkedin_url: Option<String>,
+        job_posting_url: Option<String>,
+        job_posting_label: Option<String>,
+    ) -> Result<(), String> {
+        let api_key = store_get(&app, "twenty_api_key")
+            .unwrap_or_else(|| DEFAULT_API_KEY.to_string());
+
+        let mut data_parts: Vec<String> = Vec::new();
+
+        if let Some(ref e) = email {
+            if !e.is_empty() {
+                let escaped = e.replace('"', "\\\"");
+                data_parts.push(format!(r#"emails: {{ primaryEmail: "{}" }}"#, escaped));
+            }
+        }
+        if let Some(ref url) = linkedin_url {
+            let escaped = url.replace('"', "\\\"");
+            data_parts.push(format!(r#"linkedinLink: {{ primaryLinkUrl: "{}" }}"#, escaped));
+        }
+        if let Some(ref url) = job_posting_url {
+            let label = job_posting_label.as_deref().unwrap_or("Job Posting");
+            let escaped_url = url.replace('"', "\\\"");
+            let escaped_label = label.replace('"', "\\\"");
+            data_parts.push(format!(
+                r#"jobPosting: {{ primaryLinkUrl: "{}", primaryLinkLabel: "{}" }}"#,
+                escaped_url, escaped_label
+            ));
+        }
+
+        if data_parts.is_empty() {
+            return Ok(());
+        }
+
+        let data_str = data_parts.join(", ");
+        let mutation = format!(
+            r#"mutation {{ updatePerson(id: "{}", data: {{ {} }}) {{ id }} }}"#,
+            id, data_str
+        );
+
+        let client = Client::new();
+        let resp = client
+            .post("https://hitlist.paulvinueza.dev/graphql")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&json!({ "query": mutation }))
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {}", e))?;
+
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(errors) = body["errors"].as_array() {
+            if !errors.is_empty() {
+                return Err(format!(
+                    "GraphQL error: {}",
+                    errors[0]["message"].as_str().unwrap_or("Unknown error")
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn get_contact_api_quota(app: AppHandle, api: String) -> Result<QuotaInfo, String> {
+        let client = Client::new();
+        match api.as_str() {
+            "snov" => {
+                let client_id = store_get(&app, "snov_client_id").ok_or("No Snov.io credentials configured")?;
+                let client_secret = store_get(&app, "snov_client_secret").ok_or("No Snov.io credentials configured")?;
+                let token = snov_token(&client_id, &client_secret).await?;
+                let r = snov_get(&client, "https://api.snov.io/v1/get-balance", &token).await?;
+                let balance = r["balance"].as_i64().unwrap_or(0);
+                Ok(QuotaInfo { left: balance, used: 0, label: "email credits".to_string() })
+            }
+            "hunter" => {
+                let key = store_get(&app, "hunter_api_key").ok_or("No Hunter.io API key configured")?;
+                let resp = client.get("https://api.hunter.io/v2/account")
+                    .query(&[("api_key", key.as_str())])
+                    .send().await.map_err(|e| e.to_string())?;
+                let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+                if let Some(errs) = body["errors"].as_array() {
+                    if !errs.is_empty() {
+                        return Err(format!("Hunter.io: {}", errs[0]["details"].as_str().unwrap_or("auth failed")));
+                    }
+                }
+                let searches = &body["data"]["requests"]["searches"];
+                let left = searches["left"].as_i64().unwrap_or(0);
+                let used = searches["used"].as_i64().unwrap_or(0);
+                Ok(QuotaInfo { left, used, label: "searches".to_string() })
+            }
+            "apollo" => {
+                let key = store_get(&app, "apollo_api_key").ok_or("No Apollo.io API key configured")?;
+                let resp = client.get("https://api.apollo.io/api/v1/auth/health")
+                    .header("X-Api-Key", &key)
+                    .header("Content-Type", "application/json")
+                    .send().await.map_err(|e| e.to_string())?;
+                if resp.status().is_success() {
+                    Ok(QuotaInfo { left: -1, used: 0, label: "exports".to_string() })
+                } else {
+                    Err(format!("Apollo.io auth failed: {}", resp.status()))
+                }
+            }
+            "prospeo" => {
+                let key = store_get(&app, "prospeo_api_key").ok_or("No Prospeo API key configured")?;
+                let resp = client.get("https://api.prospeo.io/user-information")
+                    .header("X-KEY", &key)
+                    .send().await.map_err(|e| e.to_string())?;
+                let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+                if body["error"].as_bool().unwrap_or(false) {
+                    return Err(format!("Prospeo: {}", body["message"].as_str().unwrap_or("auth failed")));
+                }
+                let left = body["response"]["credit_left"].as_i64().unwrap_or(0);
+                let used = body["response"]["credit_used"].as_i64().unwrap_or(0);
+                Ok(QuotaInfo { left, used, label: "credits".to_string() })
+            }
+            _ => Err(format!("Unknown API: {}", api))
+        }
+    }
+
+    #[tauri::command]
+    pub async fn hunter_search_prospects(app: AppHandle, domain: String) -> Result<Vec<SnovProspect>, String> {
+        let key = store_get(&app, "hunter_api_key").ok_or("No Hunter.io API key configured")?;
+        let client = Client::new();
+
+        let resp = client.get("https://api.hunter.io/v2/domain-search")
+            .query(&[
+                ("domain", domain.as_str()),
+                ("api_key", key.as_str()),
+                ("limit", "20"),
+                ("type", "personal"),
+            ])
+            .send().await.map_err(|e| format!("Hunter.io request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let t = resp.text().await.unwrap_or_default();
+            return Err(format!("Hunter.io {}: {}", s, &t[..t.len().min(200)]));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(errs) = body["errors"].as_array() {
+            if !errs.is_empty() {
+                return Err(format!("Hunter.io: {}", errs[0]["details"].as_str().unwrap_or("unknown error")));
+            }
+        }
+
+        fn title_score(pos: &str) -> u8 {
+            let p = pos.to_lowercase();
+            if p.contains("technical recruiter") || p.contains("tech recruiter") { return 0; }
+            if p.contains("talent acquisition") || p.contains("technical sourcer") { return 1; }
+            if p.contains("talent") { return 2; }
+            if p.contains("recruiting") || p.contains("recruiter") { return 3; }
+            if p.contains("hr") || p.contains("people ops") { return 4; }
+            5
+        }
+
+        let recruiter_depts = ["hr", "recruiting", "people", "talent"];
+
+        let mut prospects: Vec<SnovProspect> = body["data"]["emails"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|e| {
+                let first = e["first_name"].as_str().unwrap_or("").to_string();
+                let last = e["last_name"].as_str().unwrap_or("").to_string();
+                let email = e["value"].as_str().unwrap_or("").to_string();
+                let position = e["position"].as_str().unwrap_or("").to_string();
+                let dept = e["department"].as_str().unwrap_or("").to_lowercase();
+                let linkedin = e["linkedin"].as_str().unwrap_or("").to_string();
+                if first.is_empty() && last.is_empty() { return None; }
+                if email.is_empty() { return None; }
+                let is_recruiter = recruiter_depts.iter().any(|d| dept.contains(d))
+                    || title_score(&position) < 5;
+                if !is_recruiter { return None; }
+                Some(SnovProspect {
+                    first_name: first,
+                    last_name: last,
+                    position,
+                    linkedin_url: linkedin,
+                    email_start_url: String::new(),
+                    email: Some(email),
+                    source: Some("hunter".to_string()),
+                    city: None,
+                    country: None,
+                    seniority: None,
+                })
+            })
+            .collect();
+
+        prospects.sort_by_key(|p| title_score(&p.position));
+        Ok(prospects)
+    }
+
+    #[tauri::command]
+    pub async fn apollo_search_prospects(app: AppHandle, domain: String) -> Result<Vec<SnovProspect>, String> {
+        let key = store_get(&app, "apollo_api_key").ok_or("No Apollo.io API key configured")?;
+        let client = Client::new();
+
+        let resp = client.post("https://api.apollo.io/api/v1/mixed_people/search")
+            .header("X-Api-Key", &key)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "person_titles": [
+                    "recruiter", "technical recruiter", "talent acquisition",
+                    "talent acquisition specialist", "talent acquisition manager",
+                    "technical sourcer", "senior recruiter", "hr manager", "people operations"
+                ],
+                "organization_domains": [&domain],
+                "page": 1,
+                "per_page": 20
+            }))
+            .send().await.map_err(|e| format!("Apollo.io request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let t = resp.text().await.unwrap_or_default();
+            return Err(format!("Apollo.io {}: {}", s, &t[..t.len().min(200)]));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+
+        fn title_score(pos: &str) -> u8 {
+            let p = pos.to_lowercase();
+            if p.contains("technical recruiter") || p.contains("tech recruiter") { return 0; }
+            if p.contains("talent acquisition") || p.contains("technical sourcer") { return 1; }
+            if p.contains("talent") { return 2; }
+            if p.contains("recruiting") || p.contains("recruiter") { return 3; }
+            4
+        }
+
+        let mut prospects: Vec<SnovProspect> = body["people"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|p| {
+                let first = p["first_name"].as_str().unwrap_or("").to_string();
+                let last = p["last_name"].as_str().unwrap_or("").to_string();
+                let title = p["title"].as_str().unwrap_or("").to_string();
+                let linkedin = p["linkedin_url"].as_str().unwrap_or("").to_string();
+                let email = p["email"].as_str().filter(|s| !s.is_empty()).map(String::from);
+                if first.is_empty() && last.is_empty() { return None; }
+                Some(SnovProspect {
+                    first_name: first,
+                    last_name: last,
+                    position: title,
+                    linkedin_url: linkedin,
+                    email_start_url: String::new(),
+                    email,
+                    source: Some("apollo".to_string()),
+                    city: p["city"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                    country: p["country"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                    seniority: p["seniority"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                })
+            })
+            .collect();
+
+        prospects.sort_by_key(|p| title_score(&p.position));
+        Ok(prospects)
+    }
+
+    #[tauri::command]
+    pub async fn prospeo_search_prospects(app: AppHandle, domain: String) -> Result<Vec<SnovProspect>, String> {
+        let key = store_get(&app, "prospeo_api_key").ok_or("No Prospeo API key configured")?;
+        let client = Client::new();
+
+        let resp = client.post("https://api.prospeo.io/domain-search")
+            .header("X-KEY", &key)
+            .header("Content-Type", "application/json")
+            .json(&json!({ "company": &domain, "limit": 25 }))
+            .send().await.map_err(|e| format!("Prospeo request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let t = resp.text().await.unwrap_or_default();
+            return Err(format!("Prospeo {}: {}", s, &t[..t.len().min(200)]));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if body["error"].as_bool().unwrap_or(false) {
+            return Err(format!("Prospeo: {}", body["message"].as_str().unwrap_or("unknown error")));
+        }
+
+        fn title_score(pos: &str) -> u8 {
+            let p = pos.to_lowercase();
+            if p.contains("technical recruiter") || p.contains("tech recruiter") { return 0; }
+            if p.contains("talent acquisition") || p.contains("technical sourcer") { return 1; }
+            if p.contains("talent") { return 2; }
+            if p.contains("recruiting") || p.contains("recruiter") { return 3; }
+            4
+        }
+
+        let recruiter_keywords = ["recruit", "talent", "hr", "people", "hiring", "sourcer"];
+
+        let mut prospects: Vec<SnovProspect> = body["response"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|p| {
+                let first = p["first_name"].as_str().unwrap_or("").to_string();
+                let last = p["last_name"].as_str().unwrap_or("").to_string();
+                let title = p["job_title"].as_str().unwrap_or("").to_string();
+                let email = p["email"]["value"].as_str().filter(|s| !s.is_empty()).map(String::from);
+                let linkedin = p["linkedin_url"].as_str().unwrap_or("").to_string();
+                let seniority = p["seniority"].as_str().filter(|s| !s.is_empty()).map(String::from);
+                if first.is_empty() && last.is_empty() { return None; }
+                let t_lower = title.to_lowercase();
+                if !recruiter_keywords.iter().any(|k| t_lower.contains(k)) { return None; }
+                Some(SnovProspect {
+                    first_name: first,
+                    last_name: last,
+                    position: title,
+                    linkedin_url: linkedin,
+                    email_start_url: String::new(),
+                    email,
+                    source: Some("prospeo".to_string()),
+                    city: None,
+                    country: None,
+                    seniority,
+                })
+            })
+            .collect();
+
+        prospects.sort_by_key(|p| title_score(&p.position));
+        Ok(prospects)
+    }
+
+    #[tauri::command]
+    pub async fn delete_person(app: AppHandle, id: String) -> Result<(), String> {
+        let api_key = store_get(&app, "twenty_api_key")
+            .unwrap_or_else(|| DEFAULT_API_KEY.to_string());
+        let mutation = format!(
+            r#"mutation {{ deletePerson(id: "{}") {{ id }} }}"#,
+            id
+        );
+        let client = Client::new();
+        let resp = client
+            .post("https://hitlist.paulvinueza.dev/graphql")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&json!({ "query": mutation }))
+            .send()
+            .await
+            .map_err(|e| format!("Network error: {}", e))?;
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if let Some(errors) = body["errors"].as_array() {
+            if !errors.is_empty() {
+                return Err(format!(
+                    "GraphQL error: {}",
+                    errors[0]["message"].as_str().unwrap_or("Unknown error")
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[tauri::command]
@@ -1474,24 +2012,49 @@ pub mod commands {
         let system_prompt = store_get(&app, "ai_system_prompt")
             .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
 
+        // Include resume in system prompt if available
+        let resume_text = store_get(&app, "resume_text").unwrap_or_default();
+        let full_system_prompt = if !resume_text.is_empty() {
+            let truncated_resume: String = resume_text.chars().take(3000).collect();
+            format!("{}\n\nMy Resume / Background:\n{}", system_prompt, truncated_resume)
+        } else {
+            system_prompt
+        };
+
         // Load writing samples from local file
         let all_samples = load_writing_samples(&app);
-        let selected = pick_random_samples(&all_samples, 10);
+        let samples_limit: usize = store_get(&app, "ai_samples_count")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let selected = pick_random_samples(&all_samples, samples_limit);
         let samples: Option<String> = if selected.is_empty() {
             None
         } else {
             Some(selected.join("\n---\n"))
         };
 
-        // Build user prompt
-        let mut prompt = format!(
-            "Write a cold outreach email to:\nName: {}\nEmail: {}\n",
+        // Build user prompt — writing samples FIRST to establish voice and tone
+        let mut prompt = String::new();
+
+        let samples_used = if let Some(ref s) = samples {
+            if !s.is_empty() {
+                let count = s.split("\n---\n").filter(|p| !p.trim().is_empty()).count();
+                prompt.push_str(&format!(
+                    "WRITING SAMPLES — These are my actual sent emails. Match this voice, tone, and style EXACTLY:\n\n{}\n\n---\n\n",
+                    s
+                ));
+                count
+            } else { 0 }
+        } else { 0 };
+
+        prompt.push_str(&format!(
+            "Now write a cold outreach email to:\nName: {}\nEmail: {}\n",
             contact_name, contact_email
-        );
+        ));
 
         if let Some(ref title) = job_title {
             if !title.is_empty() {
-                prompt.push_str(&format!("Title: {}\n", title));
+                prompt.push_str(&format!("Their Title: {}\n", title));
             }
         }
         if let Some(ref co) = company {
@@ -1503,7 +2066,7 @@ pub mod commands {
         if let Some(ref posting) = job_posting_text {
             if !posting.is_empty() {
                 let truncated: String = posting.chars().take(1500).collect();
-                prompt.push_str(&format!("\nJob Posting Content:\n{}\n", truncated));
+                prompt.push_str(&format!("\nJob Posting:\n{}\n", truncated));
             }
         }
 
@@ -1516,17 +2079,7 @@ pub mod commands {
 
         if let Some(ref note) = user_note {
             if !note.is_empty() {
-                prompt.push_str(&format!("\nAdditional instructions: {}\n", note));
-            }
-        }
-
-        if let Some(ref s) = samples {
-            if !s.is_empty() {
-                let sample_text: String = s.chars().take(2000).collect();
-                prompt.push_str(&format!(
-                    "\nMy writing style (from sent emails):\n{}\n",
-                    sample_text
-                ));
+                prompt.push_str(&format!("\nSpecific instructions: {}\n", note));
             }
         }
 
@@ -1535,15 +2088,13 @@ pub mod commands {
         );
 
         let response_text =
-            call_ai_api(&provider, &api_key, &model, &system_prompt, &prompt).await?;
+            call_ai_api(&provider, &api_key, &model, &full_system_prompt, &prompt).await?;
 
         let json_str = extract_json(&response_text);
         let parsed: Value = serde_json::from_str(&json_str).map_err(|e| {
             let preview = &response_text[..response_text.len().min(200)];
             format!("Failed to parse AI response as JSON: {} — Raw: {}", e, preview)
         })?;
-
-        let samples_used = selected.len();
 
         Ok(GeneratedEmail {
             subject: parsed["subject"].as_str().unwrap_or("").to_string(),
@@ -1617,7 +2168,7 @@ pub mod commands {
                 let country = p["country"].as_str().filter(|s| !s.is_empty()).map(String::from);
                 let seniority = p["seniority"].as_str().filter(|s| !s.is_empty()).map(String::from);
                 if first.is_empty() && last.is_empty() { return None; }
-                Some(SnovProspect { first_name: first, last_name: last, position, linkedin_url: linkedin, email_start_url: email_start, city, country, seniority })
+                Some(SnovProspect { first_name: first, last_name: last, position, linkedin_url: linkedin, email_start_url: email_start, email: None, source: Some("snov".to_string()), city, country, seniority })
             })
             .collect();
 
@@ -1770,6 +2321,245 @@ pub mod commands {
             .map_err(|e| format!("Failed to parse created person: {}", e))
     }
 
+    // ── PDF text extraction ───────────────────────────────────────────────────
+
+    #[tauri::command]
+    pub async fn extract_pdf_text(data: Vec<u8>) -> Result<String, String> {
+        pdf_extract::extract_text_from_mem(&data)
+            .map_err(|e| format!("PDF extraction failed: {}", e))
+    }
+
+    // ── AI prompt preview (debug) ─────────────────────────────────────────────
+
+    #[tauri::command]
+    pub async fn get_ai_prompt_preview(
+        app: AppHandle,
+        contact_name: String,
+        contact_email: String,
+        job_title: Option<String>,
+        company: Option<String>,
+        job_posting_text: Option<String>,
+        linkedin_text: Option<String>,
+        user_note: Option<String>,
+    ) -> Result<AiPromptPreview, String> {
+        let provider = store_get(&app, "ai_provider").unwrap_or_else(|| "claude".to_string());
+        let model = store_get(&app, "ai_model")
+            .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
+        let system_prompt = store_get(&app, "ai_system_prompt")
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+
+        let resume_text = store_get(&app, "resume_text").unwrap_or_default();
+        let full_system_prompt = if !resume_text.is_empty() {
+            let truncated: String = resume_text.chars().take(3000).collect();
+            format!("{}\n\nMy Resume / Background:\n{}", system_prompt, truncated)
+        } else {
+            system_prompt
+        };
+
+        let all_samples = load_writing_samples(&app);
+        let samples_limit: usize = store_get(&app, "ai_samples_count")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let selected = pick_random_samples(&all_samples, samples_limit);
+
+        let mut prompt = String::new();
+        let sample_text = selected.join("\n---\n");
+        let samples_count = if !selected.is_empty() {
+            let count = selected.len();
+            prompt.push_str(&format!(
+                "WRITING SAMPLES — These are my actual sent emails. Match this voice, tone, and style EXACTLY:\n\n{}\n\n---\n\n",
+                sample_text
+            ));
+            count
+        } else { 0 };
+        prompt.push_str(&format!(
+            "Now write a cold outreach email to:\nName: {}\nEmail: {}\n",
+            contact_name, contact_email
+        ));
+        if let Some(ref t) = job_title { if !t.is_empty() { prompt.push_str(&format!("Their Title: {}\n", t)); } }
+        if let Some(ref co) = company { if !co.is_empty() { prompt.push_str(&format!("Company: {}\n", co)); } }
+        if let Some(ref posting) = job_posting_text {
+            if !posting.is_empty() {
+                let truncated: String = posting.chars().take(1500).collect();
+                prompt.push_str(&format!("\nJob Posting:\n{}\n", truncated));
+            }
+        }
+        if let Some(ref linkedin) = linkedin_text {
+            if !linkedin.is_empty() {
+                let truncated: String = linkedin.chars().take(1000).collect();
+                prompt.push_str(&format!("\nRecruiter LinkedIn Profile:\n{}\n", truncated));
+            }
+        }
+        if let Some(ref note) = user_note {
+            if !note.is_empty() { prompt.push_str(&format!("\nSpecific instructions: {}\n", note)); }
+        }
+        prompt.push_str(
+            "\nReturn ONLY valid JSON with this exact structure (no markdown, no explanation):\n{\"subject\": \"...\", \"body\": \"...\"}",
+        );
+
+        let endpoint = match provider.as_str() {
+            "claude" => "https://api.anthropic.com/v1/messages",
+            "openrouter" => "https://openrouter.ai/api/v1/chat/completions",
+            "nvidia" => "https://integrate.api.nvidia.com/v1/chat/completions",
+            "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            _ => "https://opencode.ai/zen/go/v1/chat/completions",
+        };
+
+        Ok(AiPromptPreview {
+            system_prompt: full_system_prompt,
+            user_message: prompt,
+            model,
+            provider,
+            endpoint: endpoint.to_string(),
+            samples_count,
+        })
+    }
+
+    // ── Scheduled emails ──────────────────────────────────────────────────────
+
+    #[tauri::command]
+    pub async fn schedule_email(
+        app: AppHandle,
+        contact_id: String,
+        contact_name: String,
+        contact_email: String,
+        contact_company: Option<String>,
+        subject: String,
+        body: String,
+        scheduled_at: i64,
+    ) -> Result<ScheduledEmail, String> {
+        let entry = ScheduledEmail {
+            id: gen_id(),
+            contact_id,
+            contact_name,
+            contact_email,
+            contact_company,
+            subject,
+            body,
+            scheduled_at,
+            status: "pending".to_string(),
+        };
+
+        let store = app.store("config.json").map_err(|e| e.to_string())?;
+        let mut list: Vec<ScheduledEmail> = store
+            .get("scheduled_emails")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        list.push(entry.clone());
+        store.set("scheduled_emails", serde_json::to_value(&list).unwrap_or(json!([])));
+        store.save().map_err(|e| e.to_string())?;
+
+        // Fire-and-forget to n8n webhook if configured
+        let webhook_url = store_get(&app, "n8n_webhook_url");
+        if let Some(url) = webhook_url {
+            if !url.is_empty() {
+                let payload = json!({
+                    "id": entry.id,
+                    "to": entry.contact_email,
+                    "subject": entry.subject,
+                    "body": entry.body,
+                    "scheduled_at": entry.scheduled_at,
+                    "scheduled_at_iso": unix_to_iso(entry.scheduled_at),
+                    "contact_id": entry.contact_id,
+                    "contact_name": entry.contact_name,
+                    "contact_company": entry.contact_company,
+                });
+                let client = Client::new();
+                let _ = client
+                    .post(&url)
+                    .json(&payload)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
+            }
+        }
+
+        Ok(entry)
+    }
+
+    #[tauri::command]
+    pub async fn get_scheduled_emails(app: AppHandle) -> Result<Vec<ScheduledEmail>, String> {
+        let store = app.store("config.json").map_err(|e| e.to_string())?;
+        Ok(store
+            .get("scheduled_emails")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default())
+    }
+
+    #[tauri::command]
+    pub async fn delete_scheduled_email(app: AppHandle, id: String) -> Result<(), String> {
+        let store = app.store("config.json").map_err(|e| e.to_string())?;
+        let mut list: Vec<ScheduledEmail> = store
+            .get("scheduled_emails")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        list.retain(|e| e.id != id);
+        store.set("scheduled_emails", serde_json::to_value(&list).unwrap_or(json!([])));
+        store.save().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn update_scheduled_email(
+        app: AppHandle,
+        id: String,
+        subject: String,
+        body: String,
+        scheduled_at: i64,
+    ) -> Result<(), String> {
+        let store = app.store("config.json").map_err(|e| e.to_string())?;
+        let mut list: Vec<ScheduledEmail> = store
+            .get("scheduled_emails")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        if let Some(entry) = list.iter_mut().find(|e| e.id == id) {
+            entry.subject = subject;
+            entry.body = body;
+            entry.scheduled_at = scheduled_at;
+        }
+        store.set("scheduled_emails", serde_json::to_value(&list).unwrap_or(json!([])));
+        store.save().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // ── Test n8n webhook ─────────────────────────────────────────────────────
+
+    #[tauri::command]
+    pub async fn test_n8n_webhook(app: AppHandle) -> Result<String, String> {
+        let webhook_url = store_get(&app, "n8n_webhook_url").unwrap_or_default();
+        if webhook_url.is_empty() {
+            return Err("No n8n webhook URL configured in Settings.".to_string());
+        }
+        let now = unix_now();
+        let payload = json!({
+            "id": format!("test-{}", now),
+            "to": "paulvinueza30@gmail.com",
+            "subject": "Hitlist n8n webhook test",
+            "body": "This is a test email sent by the Hitlist app to confirm your n8n webhook is working correctly.",
+            "scheduled_at": now + 60,
+            "scheduled_at_iso": unix_to_iso(now + 60),
+            "contact_id": "test",
+            "contact_name": "Paul Vinueza",
+            "contact_email": "paulvinueza30@gmail.com",
+            "contact_company": null
+        });
+        let client = Client::new();
+        let resp = client
+            .post(&webhook_url)
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {}", e))?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status >= 200 && status < 300 {
+            Ok(format!("Success ({}). Test email scheduled to send in ~1 minute.", status))
+        } else {
+            Err(format!("Webhook returned {} — {}", status, body.chars().take(200).collect::<String>()))
+        }
+    }
+
     // ── Follow-up reminders ───────────────────────────────────────────────────
 
     #[tauri::command]
@@ -1796,6 +2586,145 @@ pub mod commands {
     pub async fn get_contact_reminders(app: AppHandle) -> Result<Value, String> {
         let store = app.store("config.json").map_err(|e| e.to_string())?;
         Ok(store.get("contact_reminders").unwrap_or_else(|| json!({})))
+    }
+
+    // ── Follow-up writing samples ─────────────────────────────────────────────
+
+    #[tauri::command]
+    pub async fn get_follow_up_samples(app: AppHandle) -> Result<Vec<String>, String> {
+        Ok(load_follow_up_samples(&app))
+    }
+
+    #[tauri::command]
+    pub async fn add_follow_up_sample(app: AppHandle, text: String) -> Result<(), String> {
+        let trimmed = text.trim().to_string();
+        if trimmed.len() < 20 {
+            return Ok(());
+        }
+        let mut samples = load_follow_up_samples(&app);
+        if !samples.iter().any(|s| s == &trimmed) {
+            samples.push(trimmed);
+        }
+        save_follow_up_samples_list(&app, &samples)
+    }
+
+    #[tauri::command]
+    pub async fn delete_follow_up_sample(app: AppHandle, index: usize) -> Result<(), String> {
+        let mut samples = load_follow_up_samples(&app);
+        if index < samples.len() {
+            samples.remove(index);
+            save_follow_up_samples_list(&app, &samples)?;
+        }
+        Ok(())
+    }
+
+    // ── Generate follow-up email ──────────────────────────────────────────────
+
+    #[tauri::command]
+    pub async fn generate_follow_up_email(
+        app: AppHandle,
+        contact_name: String,
+        contact_email: String,
+        job_title: Option<String>,
+        company: Option<String>,
+        days_since_contact: i64,
+        original_subject: Option<String>,
+    ) -> Result<GeneratedEmail, String> {
+        let provider = store_get(&app, "ai_provider")
+            .unwrap_or_else(|| "claude".to_string());
+        let api_key = store_get(&app, "ai_api_key")
+            .ok_or_else(|| "No AI API key configured. Add it in Settings → AI.".to_string())?;
+        if api_key.is_empty() {
+            return Err("No AI API key configured. Add it in Settings → AI.".to_string());
+        }
+        let model = store_get(&app, "ai_model")
+            .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
+        let system_prompt = store_get(&app, "follow_up_system_prompt")
+            .unwrap_or_else(|| DEFAULT_FOLLOW_UP_SYSTEM_PROMPT.to_string());
+
+        // Load follow-up samples (fall back to regular samples if none)
+        let fu_samples = load_follow_up_samples(&app);
+        let samples_limit: usize = store_get(&app, "ai_samples_count")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+
+        let all_samples = if !fu_samples.is_empty() { fu_samples } else { load_writing_samples(&app) };
+        let selected = pick_random_samples(&all_samples, samples_limit.min(5));
+
+        let mut prompt = String::new();
+
+        let samples_used = if !selected.is_empty() {
+            let sample_text: String = selected.join("\n---\n").chars().take(2000).collect();
+            let count = sample_text.split("\n---\n").filter(|p| !p.trim().is_empty()).count();
+            prompt.push_str(&format!(
+                "FOLLOW-UP WRITING SAMPLES — Match this voice and brevity:\n\n{}\n\n---\n\n",
+                sample_text
+            ));
+            count
+        } else { 0 };
+
+        prompt.push_str(&format!(
+            "Write a brief follow-up email to:\nName: {}\nEmail: {}\n",
+            contact_name, contact_email
+        ));
+        prompt.push_str(&format!("Days since original outreach: {}\n", days_since_contact));
+
+        if let Some(ref t) = job_title { if !t.is_empty() { prompt.push_str(&format!("Their Title: {}\n", t)); } }
+        if let Some(ref co) = company { if !co.is_empty() { prompt.push_str(&format!("Company: {}\n", co)); } }
+        if let Some(ref s) = original_subject { if !s.is_empty() { prompt.push_str(&format!("Original email subject: {}\n", s)); } }
+
+        prompt.push_str(
+            "\nReturn ONLY valid JSON: {\"subject\": \"Re: <original subject or blank if replying>\", \"body\": \"...\"}",
+        );
+
+        let response_text =
+            call_ai_api(&provider, &api_key, &model, &system_prompt, &prompt).await?;
+
+        let json_str = extract_json(&response_text);
+        let parsed: Value = serde_json::from_str(&json_str).map_err(|e| {
+            let preview = &response_text[..response_text.len().min(200)];
+            format!("Failed to parse AI response as JSON: {} — Raw: {}", e, preview)
+        })?;
+
+        Ok(GeneratedEmail {
+            subject: parsed["subject"].as_str().unwrap_or("").to_string(),
+            body: parsed["body"].as_str().unwrap_or("").to_string(),
+            samples_used,
+        })
+    }
+
+    // ── AI-assisted system prompt refinement ──────────────────────────────────
+
+    #[tauri::command]
+    pub async fn refine_system_prompt(
+        app: AppHandle,
+        current_prompt: String,
+        refinement_request: String,
+        prompt_type: String, // "outreach" | "follow_up"
+    ) -> Result<String, String> {
+        let provider = store_get(&app, "ai_provider")
+            .unwrap_or_else(|| "claude".to_string());
+        let api_key = store_get(&app, "ai_api_key")
+            .ok_or_else(|| "No AI API key configured.".to_string())?;
+        if api_key.is_empty() {
+            return Err("No AI API key configured.".to_string());
+        }
+        let model = store_get(&app, "ai_model")
+            .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
+
+        let context = if prompt_type == "follow_up" {
+            "follow-up emails to recruiters who haven't replied"
+        } else {
+            "cold outreach emails to recruiters"
+        };
+
+        let system = "You are a prompt engineering expert. Improve the given system prompt based on user feedback. Return ONLY the improved system prompt text with no explanation, no markdown, no preamble. Preserve what is working, apply the requested changes.";
+        let user_msg = format!(
+            "Current system prompt for {}:\n\n{}\n\nUser's refinement request: {}\n\nReturn ONLY the improved system prompt:",
+            context, current_prompt, refinement_request
+        );
+
+        call_ai_api(&provider, &api_key, &model, system, &user_msg).await
     }
 }
 
@@ -1952,12 +2881,35 @@ pub fn run() {
             commands::get_contact_note,
             commands::add_writing_sample,
             commands::get_writing_sample_count,
+            commands::get_writing_samples,
+            commands::delete_writing_sample,
+            commands::save_resume_text,
+            commands::get_resume_text,
+            commands::parse_resume,
+            commands::update_person_fields,
             commands::snov_search_prospects,
             commands::snov_fetch_email,
             commands::snov_resolve_domain,
             commands::create_contact,
             commands::set_contact_reminder,
             commands::get_contact_reminders,
+            commands::extract_pdf_text,
+            commands::get_ai_prompt_preview,
+            commands::schedule_email,
+            commands::get_scheduled_emails,
+            commands::delete_scheduled_email,
+            commands::update_scheduled_email,
+            commands::test_n8n_webhook,
+            commands::get_follow_up_samples,
+            commands::add_follow_up_sample,
+            commands::delete_follow_up_sample,
+            commands::generate_follow_up_email,
+            commands::refine_system_prompt,
+            commands::delete_person,
+            commands::get_contact_api_quota,
+            commands::hunter_search_prospects,
+            commands::apollo_search_prospects,
+            commands::prospeo_search_prospects,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

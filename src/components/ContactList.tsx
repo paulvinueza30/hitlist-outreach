@@ -1,7 +1,7 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Person } from "../types";
 
-type Filter = "all" | "pending" | "contacted" | "failed" | "followup";
+type Filter = "all" | "pending" | "contacted" | "failed";
 type SortOrder = "default" | "name_az" | "name_za" | "company" | "recent" | "oldest";
 
 interface Props {
@@ -10,12 +10,21 @@ interface Props {
   loading: boolean;
   onSelect: (p: Person) => void;
   contactStates: Record<string, string>;
-  contactReminders: Record<string, number>;
   onAddContact: () => void;
 }
 
 function fullName(p: Person) {
   return `${p.name.firstName} ${p.name.lastName}`.trim();
+}
+
+function relativeAge(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const d = Math.floor(diff / 86400000);
+  if (d < 1) return "today";
+  if (d < 7) return `${d}d`;
+  const w = Math.floor(d / 7);
+  if (w < 5) return `${w}w`;
+  return `${Math.floor(d / 30)}mo`;
 }
 
 function dotColor(p: Person, states: Record<string, string>): string {
@@ -26,10 +35,12 @@ function dotColor(p: Person, states: Record<string, string>): string {
   return "var(--primary)";
 }
 
-export default function ContactList({ contacts, selected, loading, onSelect, contactStates, contactReminders, onAddContact }: Props) {
+export default function ContactList({ contacts, selected, loading, onSelect, contactStates, onAddContact }: Props) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("pending");
   const [sortOrder, setSortOrder] = useState<SortOrder>("default");
+  const [kbIdx, setKbIdx] = useState(-1);
+  const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
@@ -44,13 +55,11 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
       const isFailed = state === "failed";
       const isContacted = p.contacted === true && !isFailed;
       const isPending = !p.contacted && !isFailed;
-      const hasReminder = !!contactReminders[p.id];
       const matchesFilter =
         filter === "all" ||
         (filter === "pending" && isPending) ||
         (filter === "contacted" && isContacted) ||
-        (filter === "failed" && isFailed) ||
-        (filter === "followup" && hasReminder);
+        (filter === "failed" && isFailed);
       return matchesSearch && matchesFilter;
     });
   }, [contacts, search, filter, contactStates]);
@@ -75,18 +84,6 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
     }
   }, [filtered, sortOrder]);
 
-  // Float overdue reminders to top within current sort
-  const withReminders = useMemo(() => {
-    const now = Date.now() / 1000;
-    return [...sorted].sort((a, b) => {
-      const aOverdue = (contactReminders[a.id] ?? 0) > 0 && contactReminders[a.id] < now;
-      const bOverdue = (contactReminders[b.id] ?? 0) > 0 && contactReminders[b.id] < now;
-      if (aOverdue && !bOverdue) return -1;
-      if (!aOverdue && bOverdue) return 1;
-      return 0;
-    });
-  }, [sorted, contactReminders]);
-
   const counts = useMemo(() => {
     const all = contacts.length;
     const failed = contacts.filter((p) => contactStates[p.id] === "failed").length;
@@ -96,16 +93,74 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
     const pending = contacts.filter(
       (p) => !p.contacted && contactStates[p.id] !== "failed"
     ).length;
-    const followup = contacts.filter((p) => !!contactReminders[p.id]).length;
-    return { all, pending, contacted, failed, followup };
-  }, [contacts, contactStates, contactReminders]);
+    return { all, pending, contacted, failed };
+  }, [contacts, contactStates]);
+
+  // Sync keyboard index when selected contact changes
+  useEffect(() => {
+    if (!selected) { setKbIdx(-1); return; }
+    const idx = sorted.findIndex((p) => p.id === selected.id);
+    setKbIdx(idx);
+  }, [selected, sorted]);
+
+  // Clamp kbIdx when sorted list shrinks
+  useEffect(() => {
+    setKbIdx((prev) => (prev >= sorted.length ? sorted.length - 1 : prev));
+  }, [sorted]);
+
+  // Filter shortcuts: 1=pending, 2=contacted, 3=failed, 4=all; g=jump to top
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "1") { setFilter("pending"); setKbIdx(0); }
+      else if (e.key === "2") { setFilter("contacted"); setKbIdx(0); }
+      else if (e.key === "3") { setFilter("failed"); setKbIdx(0); }
+      else if (e.key === "4") { setFilter("all"); setKbIdx(0); }
+      else if (e.key === "g") {
+        setKbIdx(0);
+        itemRefs.current[0]?.scrollIntoView({ block: "start" });
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // j/k keyboard navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        setKbIdx((prev) => {
+          const next = Math.min(prev + 1, sorted.length - 1);
+          itemRefs.current[next]?.scrollIntoView({ block: "nearest" });
+          return next;
+        });
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setKbIdx((prev) => {
+          const next = Math.max(prev - 1, 0);
+          itemRefs.current[next]?.scrollIntoView({ block: "nearest" });
+          return next;
+        });
+      } else if (e.key === "Enter") {
+        setKbIdx((prev) => {
+          if (prev >= 0 && prev < sorted.length) onSelect(sorted[prev]);
+          return prev;
+        });
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [sorted, onSelect]);
 
   const TABS: { key: Filter; label: (c: typeof counts) => string }[] = [
-    { key: "pending", label: (c) => `Pending (${c.pending})` },
-    { key: "contacted", label: (c) => `Contacted (${c.contacted})` },
-    { key: "failed", label: (c) => `Failed (${c.failed})` },
-    { key: "followup", label: (c) => `⏰ (${c.followup})` },
-    { key: "all", label: (c) => `All (${c.all})` },
+    { key: "pending", label: (c) => `Uncontacted ${c.pending}` },
+    { key: "contacted", label: (c) => `Contacted ${c.contacted}` },
+    { key: "failed", label: (c) => `Failed ${c.failed}` },
+    { key: "all", label: (c) => `All ${c.all}` },
   ];
 
   return (
@@ -120,34 +175,27 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
         overflow: "hidden",
       }}
     >
-      {/* Search + Sort row */}
-      <div style={{ padding: "8px 8px 4px", display: "flex", gap: 4 }}>
-        <input
-          type="text"
-          placeholder="Search…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ flex: 1, padding: "5px 8px", fontSize: 12 }}
-        />
-        <button
-          onClick={onAddContact}
-          title="Add contact"
-          style={{
-            background: "var(--accent)",
-            color: "#fff",
-            padding: "5px 10px",
-            fontSize: 13,
-            fontWeight: 700,
-            flexShrink: 0,
-          }}
-        >
-          +
-        </button>
+      {/* Search + Sort + Add row */}
+      <div style={{ padding: "10px 8px 6px", display: "flex", gap: 4 }}>
+        <div style={{ flex: 1, position: "relative" }}>
+          <input
+            type="text"
+            placeholder="Search contacts…"
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setKbIdx(0); }}
+            style={{ width: "100%", padding: "6px 9px", paddingRight: 36, fontSize: 12 }}
+          />
+          {sorted.length > 0 && (
+            <span style={{ position: "absolute", right: 7, top: "50%", transform: "translateY(-50%)", fontSize: 9, color: "var(--text-muted)", pointerEvents: "none" }}>
+              {sorted.length}
+            </span>
+          )}
+        </div>
         <select
           value={sortOrder}
           onChange={(e) => setSortOrder(e.target.value as SortOrder)}
           title="Sort order"
-          style={{ width: 80, fontSize: 11, padding: "4px 4px" }}
+          style={{ width: 72, fontSize: 11, padding: "4px 4px" }}
         >
           <option value="default">Default</option>
           <option value="name_az">A → Z</option>
@@ -159,17 +207,19 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
       </div>
 
       {/* Filter tabs */}
-      <div style={{ display: "flex", padding: "0 8px 6px", gap: 3 }}>
+      <div style={{ display: "flex", padding: "0 8px 8px", gap: 3 }}>
         {TABS.map(({ key, label }) => (
           <button
             key={key}
             onClick={() => setFilter(key)}
             style={{
               flex: 1,
-              padding: "3px 0",
+              padding: "4px 0",
               fontSize: 10,
+              fontWeight: filter === key ? 600 : 400,
               background: filter === key ? "var(--primary)" : "var(--surface2)",
               color: filter === key ? "#fff" : "var(--text-muted)",
+              borderRadius: 4,
             }}
           >
             {label(counts)}
@@ -189,31 +239,37 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
             No contacts found
           </div>
         )}
-        {withReminders.map((p) => {
+        {sorted.map((p, i) => {
           const isSelected = selected?.id === p.id;
+          const isKbFocused = kbIdx === i && !isSelected;
           const state = contactStates[p.id];
           const dot = dotColor(p, contactStates);
-          const reminderTs = contactReminders[p.id];
-          const isOverdueReminder = reminderTs && reminderTs < Date.now() / 1000;
+          const isStale = !p.contacted && state !== "failed" && p.createdAt
+            && (Date.now() - new Date(p.createdAt).getTime()) > 7 * 24 * 60 * 60 * 1000;
           return (
             <div
               key={p.id}
-              onClick={() => onSelect(p)}
+              ref={(el) => { itemRefs.current[i] = el; }}
+              onClick={() => { setKbIdx(i); onSelect(p); }}
               style={{
-                padding: "9px 10px",
+                padding: "9px 12px",
                 cursor: "pointer",
-                background: isSelected ? "var(--surface2)" : "transparent",
-                borderLeft: isSelected ? "2px solid var(--primary)" : "2px solid transparent",
+                background: isSelected
+                  ? "color-mix(in srgb, var(--primary) 10%, var(--surface))"
+                  : isKbFocused
+                  ? "var(--surface2)"
+                  : "transparent",
+                borderLeft: isSelected ? "2px solid var(--primary)" : isKbFocused ? "2px solid var(--text-muted)" : "2px solid transparent",
                 borderBottom: "1px solid var(--border)",
                 transition: "background 0.1s",
-                opacity: state === "failed" ? 0.55 : 1,
+                opacity: state === "failed" ? 0.5 : 1,
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                 <span
                   style={{
-                    width: 6,
-                    height: 6,
+                    width: 7,
+                    height: 7,
                     borderRadius: "50%",
                     background: dot,
                     flexShrink: 0,
@@ -226,28 +282,23 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
+                    flex: 1,
                     textDecoration: state === "failed" ? "line-through" : "none",
                   }}
                 >
                   {fullName(p)}
                 </span>
                 {state === "replied" && (
-                  <span style={{ fontSize: 9, color: "var(--success)", flexShrink: 0 }}>↩</span>
+                  <span style={{ fontSize: 10, color: "var(--success)", flexShrink: 0 }}>↩</span>
                 )}
-                {reminderTs && (
-                  <span
-                    style={{
-                      fontSize: 9,
-                      color: isOverdueReminder ? "var(--danger)" : "var(--warning)",
-                      flexShrink: 0,
-                    }}
-                  >
-                    ⏰
+                {p.createdAt && (
+                  <span style={{ fontSize: 9, color: isStale ? "var(--warning)" : "var(--text-muted)", flexShrink: 0, opacity: 0.7 }}>
+                    {relativeAge(p.createdAt)}
                   </span>
                 )}
               </div>
               {p.company?.name && (
-                <div style={{ color: "var(--text-muted)", fontSize: 11, paddingLeft: 11 }}>
+                <div style={{ color: "var(--text-muted)", fontSize: 11, paddingLeft: 13, fontWeight: 500 }}>
                   {p.company.name}
                 </div>
               )}
@@ -256,7 +307,7 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
                   style={{
                     color: "var(--text-muted)",
                     fontSize: 11,
-                    paddingLeft: 11,
+                    paddingLeft: 13,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -268,6 +319,27 @@ export default function ContactList({ contacts, selected, loading, onSelect, con
             </div>
           );
         })}
+      </div>
+
+      {/* Add button at bottom */}
+      <div style={{ padding: "8px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+        <button
+          onClick={onAddContact}
+          style={{
+            width: "100%",
+            background: "var(--accent)",
+            color: "#fff",
+            padding: "7px 0",
+            fontSize: 12,
+            fontWeight: 600,
+            borderRadius: 6,
+          }}
+        >
+          + Add Contacts
+        </button>
+        <div style={{ textAlign: "center", marginTop: 5, fontSize: 9, color: "var(--text-muted)", opacity: 0.6 }}>
+          j/k · Enter · c compose · 1-4 filter · g top
+        </div>
       </div>
     </div>
   );

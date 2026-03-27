@@ -62,8 +62,35 @@ export interface AppConfig {
   google_client_secret: string;
   gmail_connected: boolean;
   apollo_api_key: string;
+  hunter_api_key: string;
+  prospeo_api_key: string;
   snov_client_id: string;
   snov_client_secret: string;
+  n8n_webhook_url: string;
+  ai_samples_count: number;
+  follow_up_days: number;
+  follow_up_system_prompt: string;
+}
+
+export interface ScheduledEmail {
+  id: string;
+  contact_id: string;
+  contact_name: string;
+  contact_email: string;
+  contact_company: string | null;
+  subject: string;
+  body: string;
+  scheduled_at: number; // Unix seconds
+  status: "pending" | "sent" | "failed";
+}
+
+export interface AiPromptPreview {
+  system_prompt: string;
+  user_message: string;
+  model: string;
+  provider: string;
+  endpoint: string;
+  samples_count: number;
 }
 
 export interface SnovProspect {
@@ -72,11 +99,11 @@ export interface SnovProspect {
   position: string;
   linkedin_url: string;
   email_start_url: string;
+  email?: string;
+  source?: string;
   city?: string;
   country?: string;
   seniority?: string;
-  // enriched client-side after email fetch:
-  email?: string;
 }
 
 export interface CreateContactInput {
@@ -128,3 +155,12 @@ export interface ContactContext {
 
 // "failed" | "replied" | "" (empty = none)
 export type ContactState = string;
+
+export interface ParsedResume {
+  name: string;
+  title: string;
+  summary: string;
+  skills: string[];
+  experience: string[];
+  education: string;
+}
