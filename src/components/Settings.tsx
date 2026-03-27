@@ -60,6 +60,10 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
   const [hunterApiKey, setHunterApiKey] = useState("");
   const [apolloApiKey, setApolloApiKey] = useState("");
   const [prospeoApiKey, setProspeoApiKey] = useState("");
+  const [snovEnabled, setSnovEnabled] = useState(true);
+  const [hunterEnabled, setHunterEnabled] = useState(true);
+  const [prospeoEnabled, setProspeoEnabled] = useState(true);
+  const [apolloEnabled, setApolloEnabled] = useState(false);
   const [quotas, setQuotas] = useState<Record<string, { left: number; used: number; label: string } | null>>({});
   const [checkingQuota, setCheckingQuota] = useState<Record<string, boolean>>({});
 
@@ -81,6 +85,7 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
   const [newFollowUpSample, setNewFollowUpSample] = useState("");
   const [addingFollowUpSample, setAddingFollowUpSample] = useState(false);
   const [followUpSampleModal, setFollowUpSampleModal] = useState<number | null>(null);
+  const [tab, setTab] = useState<"connections" | "apis" | "ai" | "resume">("connections");
   const [followUpCarouselPage, setFollowUpCarouselPage] = useState(0);
   const [refiningOutreach, setRefiningOutreach] = useState(false);
   const [refineOutreachRequest, setRefineOutreachRequest] = useState("");
@@ -122,6 +127,10 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
       setHunterApiKey(config.hunter_api_key || "");
       setApolloApiKey(config.apollo_api_key || "");
       setProspeoApiKey(config.prospeo_api_key || "");
+      setSnovEnabled(config.snov_enabled ?? true);
+      setHunterEnabled(config.hunter_enabled ?? true);
+      setProspeoEnabled(config.prospeo_enabled ?? true);
+      setApolloEnabled(config.apollo_enabled ?? false);
       setN8nWebhookUrl(config.n8n_webhook_url || "");
       setAiSamplesCount(config.ai_samples_count ?? 10);
       setFollowUpDays(config.follow_up_days ?? 7);
@@ -209,7 +218,7 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
     setError(null);
     setSuccess(false);
     try {
-      await invoke("save_config", { apiKey, clientId, clientSecret, snovClientId, snovClientSecret, hunterApiKey, apolloApiKey, prospeoApiKey, n8nWebhookUrl, aiSamplesCount, followUpDays, followUpSystemPrompt });
+      await invoke("save_config", { apiKey, clientId, clientSecret, snovClientId, snovClientSecret, hunterApiKey, apolloApiKey, prospeoApiKey, snovEnabled, hunterEnabled, prospeoEnabled, apolloEnabled, n8nWebhookUrl, aiSamplesCount, followUpDays, followUpSystemPrompt });
       await invoke("save_ai_config", {
         provider: aiProvider,
         apiKey: aiApiKey,
@@ -266,7 +275,7 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
     setWebhookTestResult(null);
     // Save webhook URL first so the command picks it up
     try {
-      await invoke("save_config", { apiKey, clientId, clientSecret, snovClientId, snovClientSecret, hunterApiKey, apolloApiKey, prospeoApiKey, n8nWebhookUrl, aiSamplesCount, followUpDays, followUpSystemPrompt });
+      await invoke("save_config", { apiKey, clientId, clientSecret, snovClientId, snovClientSecret, hunterApiKey, apolloApiKey, prospeoApiKey, snovEnabled, hunterEnabled, prospeoEnabled, apolloEnabled, n8nWebhookUrl, aiSamplesCount, followUpDays, followUpSystemPrompt });
     } catch { /* ignore save errors */ }
     try {
       const msg = await invoke<string>("test_n8n_webhook");
@@ -375,20 +384,53 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
     }
   };
 
+  const TABS = [
+    { key: "connections" as const, label: "Connections" },
+    { key: "apis" as const, label: "Contact APIs" },
+    { key: "ai" as const, label: "AI" },
+    { key: "resume" as const, label: "Resume" },
+  ];
+
   return (
-    <div
-      style={{
-        flex: 1,
-        overflowY: "auto",
-        padding: "24px 28px",
-        maxWidth: 680,
-        margin: "0 auto",
-        width: "100%",
-      }}
-    >
-      <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 24, color: "var(--primary)" }}>
-        Settings
-      </h2>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
+      {/* ── Sticky header: tabs + save ── */}
+      <div style={{ flexShrink: 0, borderBottom: "1px solid var(--border)", padding: "10px 20px", display: "flex", alignItems: "center", gap: 8, background: "var(--surface)" }}>
+        <div style={{ display: "flex", gap: 4, flex: 1 }}>
+          {TABS.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              style={{
+                padding: "5px 14px", fontSize: 12, borderRadius: 6, fontWeight: tab === t.key ? 700 : 400,
+                background: tab === t.key ? "var(--primary)" : "var(--surface2)",
+                color: tab === t.key ? "#fff" : "var(--text-muted)",
+                border: tab === t.key ? "none" : "1px solid var(--border)",
+              }}
+            >{t.label}</button>
+          ))}
+        </div>
+        {error && <span style={{ fontSize: 11, color: "var(--danger)" }}>{error}</span>}
+        {success && <span style={{ fontSize: 11, color: "var(--success)" }}>Saved ✓</span>}
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          style={{ background: "var(--primary)", color: "#fff", padding: "6px 20px", fontWeight: 700, fontSize: 12, borderRadius: 6, flexShrink: 0 }}
+        >
+          {saving ? "Saving…" : "Save Settings"}
+        </button>
+        <button
+          onClick={onSaved}
+          style={{ background: "var(--surface2)", color: "var(--text)", padding: "6px 12px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)" }}
+        >✕</button>
+      </div>
+
+      {/* ── Scrollable tab content ── */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px", maxWidth: 680, margin: "0 auto", width: "100%" }}>
+
+
+      {/* ══ CONNECTIONS TAB ══ */}
+      {tab === "connections" && <>
 
       {/* ── Twenty CRM ── */}
       <Section title="Twenty CRM">
@@ -487,6 +529,11 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
         {(!clientId || !clientSecret) && <Hint>Save Client ID and Secret first, then connect.</Hint>}
       </Section>
 
+      </>}{/* end connections tab */}
+
+      {/* ══ APIS TAB ══ */}
+      {tab === "apis" && <>
+
       {/* ── Contact APIs ── */}
       <Section title="Contact APIs (Find Recruiters)">
         <Hint>APIs are tried in order — Snov → Hunter → Prospeo → Apollo — until results are found. Configure as many as you want for maximum coverage.</Hint>
@@ -498,6 +545,8 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
           quota={quotas["snov"]}
           checking={!!checkingQuota["snov"]}
           onCheck={() => checkQuota("snov")}
+          enabled={snovEnabled}
+          onToggle={() => setSnovEnabled(v => !v)}
         >
           <input
             type="text"
@@ -522,6 +571,8 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
           quota={quotas["hunter"]}
           checking={!!checkingQuota["hunter"]}
           onCheck={() => checkQuota("hunter")}
+          enabled={hunterEnabled}
+          onToggle={() => setHunterEnabled(v => !v)}
         >
           <input
             type="password"
@@ -539,6 +590,8 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
           quota={quotas["prospeo"]}
           checking={!!checkingQuota["prospeo"]}
           onCheck={() => checkQuota("prospeo")}
+          enabled={prospeoEnabled}
+          onToggle={() => setProspeoEnabled(v => !v)}
         >
           <input
             type="password"
@@ -552,10 +605,12 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
         {/* Apollo.io */}
         <ApiRow
           name="Apollo.io"
-          hint="apollo.io → Settings → Integrations · 50 exports/mo free"
+          hint="apollo.io → Settings → Integrations · 50 exports/mo free · prospect search may require paid plan"
           quota={quotas["apollo"]}
           checking={!!checkingQuota["apollo"]}
           onCheck={() => checkQuota("apollo")}
+          enabled={apolloEnabled}
+          onToggle={() => setApolloEnabled(v => !v)}
         >
           <input
             type="password"
@@ -566,6 +621,11 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
           />
         </ApiRow>
       </Section>
+
+      </>}{/* end apis tab */}
+
+      {/* ══ CONNECTIONS TAB — n8n ══ */}
+      {tab === "connections" && <>
 
       {/* ── n8n Scheduler ── */}
       <Section title="n8n Email Scheduler">
@@ -598,6 +658,11 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
           )}
         </div>
       </Section>
+
+      </>}{/* end connections n8n */}
+
+      {/* ══ RESUME TAB ══ */}
+      {tab === "resume" && <>
 
       {/* ── Resume ── */}
       <Section title="Your Resume">
@@ -1045,6 +1110,11 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
         )}
       </Section>
 
+      </>}{/* end resume tab */}
+
+      {/* ══ AI TAB ══ */}
+      {tab === "ai" && <>
+
       {/* ── AI Email Generation ── */}
       <Section title="AI Email Generation">
         <Label>Provider</Label>
@@ -1270,28 +1340,9 @@ export default function Settings({ config, aiConfig, onSaved, onStartAuth, authP
         )}
       </Section>
 
-      {/* ── Actions ── */}
-      {error && (
-        <div style={{ color: "var(--danger)", fontSize: 12, marginBottom: 10 }}>{error}</div>
-      )}
-      {success && (
-        <div style={{ color: "var(--success)", fontSize: 12, marginBottom: 10 }}>Settings saved!</div>
-      )}
-      <div style={{ display: "flex", gap: 8, marginBottom: 32 }}>
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          style={{ background: "var(--primary)", color: "#fff", padding: "8px 24px", fontWeight: 700, fontSize: 13 }}
-        >
-          {saving ? "Saving…" : "Save Settings"}
-        </button>
-        <button
-          onClick={onSaved}
-          style={{ background: "var(--surface2)", color: "var(--text)", padding: "8px 16px", fontSize: 12 }}
-        >
-          Cancel
-        </button>
-      </div>
+      </>}{/* end ai tab */}
+
+      </div>{/* end scrollable content */}
     </div>
   );
 }
@@ -1333,37 +1384,63 @@ function Hint({ children }: { children: React.ReactNode }) {
 }
 
 function ApiRow({
-  name, hint, quota, checking, onCheck, children
+  name, hint, quota, checking, onCheck, enabled, onToggle, children
 }: {
   name: string;
   hint: string;
   quota: { left: number; used: number; label: string } | null | undefined;
   checking: boolean;
   onCheck: () => void;
+  enabled: boolean;
+  onToggle: () => void;
   children: React.ReactNode;
 }) {
   return (
-    <div style={{ marginBottom: 14, padding: "10px 12px", background: "var(--surface2)", borderRadius: 8, border: "1px solid var(--border)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ fontSize: 12, fontWeight: 700 }}>{name}</span>
+    <div style={{ marginBottom: 10, padding: "10px 12px", background: "var(--surface2)", borderRadius: 8, border: `1px solid ${enabled ? "var(--border)" : "color-mix(in srgb, var(--border) 50%, transparent)"}`, opacity: enabled ? 1 : 0.55, transition: "opacity 0.15s" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: enabled ? 8 : 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {quota !== undefined && quota !== null && (
-            <span style={{ fontSize: 11, color: quota.left > 0 ? "var(--success)" : "var(--danger)", fontWeight: 600 }}>
-              {quota.left === -1 ? "active" : `${quota.left} ${quota.label} left`}
-              {quota.used > 0 && quota.left !== -1 && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {quota.used} used</span>}
-            </span>
-          )}
+          {/* Toggle */}
           <button
-            onClick={onCheck}
-            disabled={checking}
-            style={{ background: "var(--surface)", border: "1px solid var(--border)", padding: "3px 10px", fontSize: 11, borderRadius: 5 }}
+            onClick={onToggle}
+            title={enabled ? "Disable" : "Enable"}
+            style={{
+              width: 32, height: 18, borderRadius: 9, padding: 0,
+              background: enabled ? "var(--primary)" : "var(--border)",
+              border: "none", cursor: "pointer", position: "relative", flexShrink: 0,
+              transition: "background 0.15s",
+            }}
           >
-            {checking ? "…" : "Check Quota"}
+            <span style={{
+              position: "absolute", top: 2, left: enabled ? 16 : 2, width: 14, height: 14,
+              borderRadius: "50%", background: "#fff", transition: "left 0.15s",
+            }} />
           </button>
+          <span style={{ fontSize: 12, fontWeight: 700 }}>{name}</span>
         </div>
+        {enabled && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {quota !== undefined && quota !== null && (
+              <span style={{ fontSize: 11, color: quota.left > 0 ? "var(--success)" : "var(--danger)", fontWeight: 600 }}>
+                {quota.left === -1 ? "active" : `${quota.left} ${quota.label} left`}
+                {quota.used > 0 && quota.left !== -1 && <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · {quota.used} used</span>}
+              </span>
+            )}
+            <button
+              onClick={onCheck}
+              disabled={checking}
+              style={{ background: "var(--surface)", border: "1px solid var(--border)", padding: "3px 10px", fontSize: 11, borderRadius: 5 }}
+            >
+              {checking ? "…" : "Check Quota"}
+            </button>
+          </div>
+        )}
       </div>
-      <div style={{ display: "flex", gap: 6 }}>{children}</div>
-      <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 5 }}>{hint}</div>
+      {enabled && (
+        <>
+          <div style={{ display: "flex", gap: 6 }}>{children}</div>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 5 }}>{hint}</div>
+        </>
+      )}
     </div>
   );
 }

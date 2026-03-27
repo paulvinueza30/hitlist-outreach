@@ -278,6 +278,15 @@ export default function App() {
 
   const aiConfigured = !!(aiConfig?.api_key);
   const snovConfigured = !!(config?.snov_client_id && config?.snov_client_secret);
+  const enabledApis = useMemo(() => {
+    if (!config) return [] as string[];
+    const apis: string[] = [];
+    if (config.snov_enabled && config.snov_client_id && config.snov_client_secret) apis.push("snov");
+    if (config.hunter_enabled && config.hunter_api_key) apis.push("hunter");
+    if (config.prospeo_enabled && config.prospeo_api_key) apis.push("prospeo");
+    if (config.apollo_enabled && config.apollo_api_key) apis.push("apollo");
+    return apis;
+  }, [config]);
 
   const exportCSV = useCallback(() => {
     const esc = (s: string) => `"${(s ?? "").replace(/"/g, '""')}"`;
@@ -536,6 +545,7 @@ export default function App() {
             setView("contacts");
           }}
           snovConfigured={snovConfigured}
+          enabledApis={enabledApis}
           existingContacts={contacts}
         />
       ) : (

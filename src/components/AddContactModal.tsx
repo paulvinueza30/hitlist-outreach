@@ -6,6 +6,7 @@ interface Props {
   onClose: () => void;
   onAdded: (people: Person[]) => void;
   snovConfigured: boolean;
+  enabledApis: string[];
   existingContacts: Person[];
   isPage?: boolean;
 }
@@ -58,7 +59,14 @@ function isLinkedInCompanyUrl(s: string) {
 
 type Mode = "snov" | "manual";
 
-export default function AddContactModal({ onClose, onAdded, snovConfigured, existingContacts, isPage }: Props) {
+const API_META: Record<string, { cmd: string; label: string }> = {
+  snov:    { cmd: "snov_search_prospects",    label: "Snov.io" },
+  hunter:  { cmd: "hunter_search_prospects",  label: "Hunter.io" },
+  prospeo: { cmd: "prospeo_search_prospects", label: "Prospeo" },
+  apollo:  { cmd: "apollo_search_prospects",  label: "Apollo.io" },
+};
+
+export default function AddContactModal({ onClose, onAdded, snovConfigured, enabledApis, existingContacts, isPage }: Props) {
   const existingEmails = new Set(
     existingContacts.flatMap(c => c.emails?.primaryEmail ? [c.emails.primaryEmail.toLowerCase()] : [])
   );
@@ -77,6 +85,7 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
   const [searchError, setSearchError] = useState<string | null>(null);
   const [prospects, setProspects] = useState<SnovProspect[]>([]);
   const [sourceUsed, setSourceUsed] = useState<string | null>(null);
+  const [selectedApi, setSelectedApi] = useState<"auto" | string>("auto");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [adding, setAdding] = useState(false);
   const [scraping, setScraping] = useState(false);
@@ -139,15 +148,19 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
     setSelected(new Set());
     setSourceUsed(null);
 
-    const apis: Array<{ cmd: string; label: string }> = [
-      { cmd: "snov_search_prospects", label: "Snov.io" },
-      { cmd: "hunter_search_prospects", label: "Hunter.io" },
-      { cmd: "prospeo_search_prospects", label: "Prospeo" },
-      { cmd: "apollo_search_prospects", label: "Apollo.io" },
-    ];
+    // Build the list of APIs to try
+    const toTry = selectedApi === "auto"
+      ? enabledApis.map(k => API_META[k]).filter(Boolean)
+      : API_META[selectedApi] ? [API_META[selectedApi]] : [];
 
-    let lastError = "";
-    for (const { cmd, label } of apis) {
+    if (toTry.length === 0) {
+      setSearchError("No APIs configured. Go to Settings → Contact APIs and add at least one key.");
+      setSearching(false);
+      return;
+    }
+
+    const errors: string[] = [];
+    for (const { cmd, label } of toTry) {
       try {
         const results = await invoke<SnovProspect[]>(cmd, { domain: d });
         if (results.length > 0) {
@@ -156,19 +169,18 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
           setSearching(false);
           return;
         }
+        // Empty result — keep trying other APIs in auto mode
+        errors.push(`${label}: 0 results`);
       } catch (e) {
-        lastError = `${label}: ${String(e)}`;
-        // continue to next API
+        errors.push(`${label}: ${String(e)}`);
       }
     }
 
     setSearchError(
-      lastError
-        ? `No results from any API. Last error — ${lastError}`
-        : "No recruiters found across all APIs. Try a different domain."
+      `No recruiters found. Tried: ${errors.join(" · ")}`
     );
     setSearching(false);
-  }, [domain]);
+  }, [domain, selectedApi, enabledApis]);
 
   const toggleSelect = (i: number) => {
     setSelected(prev => {
@@ -189,7 +201,12 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
     for (const i of Array.from(selected)) {
       if (!updated[i].email && updated[i].email_start_url) {
         try {
-          const email = await invoke<string>("snov_fetch_email", { emailStartUrl: updated[i].email_start_url });
+          let email: string;
+          if (updated[i].source === "prospeo") {
+            email = await invoke<string>("prospeo_fetch_email", { personId: updated[i].email_start_url });
+          } else {
+            email = await invoke<string>("snov_fetch_email", { emailStartUrl: updated[i].email_start_url });
+          }
           updated[i] = { ...updated[i], email };
         } catch { /* skip, will block below */ }
       }
@@ -299,18 +316,47 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, exis
             </div>
           )}
           {mode === "snov" ? (
-            <SnovPanel
-              jobUrl={jobUrl} setJobUrl={setJobUrl}
-              domain={domain} setDomain={setDomain}
-              companyDisplay={companyDisplay} setCompanyDisplay={setCompanyDisplay}
-              scrapedCompany={scrapedCompany}
-              scraping={scraping} onScrape={handleScrapeJobUrl}
-              searching={searching} onSearch={handleSearch}
-              searchError={searchError}
-              prospects={prospects}
-              selected={selected} onToggle={toggleSelect}
-              adding={adding} onAddSelected={handleAddSelected}
-            />
+            <>
+              {/* API selector */}
+              {enabledApis.length > 0 && (
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+                  {(["auto", ...enabledApis] as string[]).map(api => {
+                    const label = api === "auto" ? "Auto" : (API_META[api]?.label ?? api);
+                    const active = selectedApi === api;
+                    return (
+                      <button
+                        key={api}
+                        onClick={() => setSelectedApi(api)}
+                        style={{
+                          padding: "3px 10px", fontSize: 11, borderRadius: 12,
+                          background: active ? "var(--primary)" : "var(--surface2)",
+                          color: active ? "#fff" : "var(--text-muted)",
+                          border: active ? "none" : "1px solid var(--border)",
+                          fontWeight: active ? 600 : 400,
+                        }}
+                      >{label}</button>
+                    );
+                  })}
+                  {sourceUsed && (
+                    <span style={{ marginLeft: 4, alignSelf: "center", fontSize: 10, color: "var(--text-muted)" }}>
+                      last result: <strong style={{ color: "var(--primary)" }}>{sourceUsed}</strong>
+                    </span>
+                  )}
+                </div>
+              )}
+              <SnovPanel
+                jobUrl={jobUrl} setJobUrl={setJobUrl}
+                domain={domain} setDomain={setDomain}
+                companyDisplay={companyDisplay} setCompanyDisplay={setCompanyDisplay}
+                scrapedCompany={scrapedCompany}
+                scraping={scraping} onScrape={handleScrapeJobUrl}
+                searching={searching} onSearch={handleSearch}
+                searchError={searchError}
+                prospects={prospects}
+                selected={selected} onToggle={toggleSelect}
+                adding={adding} onAddSelected={handleAddSelected}
+              />
+            </>
           ) : (
             <ManualPanel
               firstName={firstName} setFirstName={setFirstName}
@@ -454,8 +500,13 @@ function SnovPanel({
       </div>
 
       {searchError && (
-        <div style={{ fontSize: 12, color: "var(--danger)", padding: "6px 10px", background: "color-mix(in srgb, var(--danger) 12%, transparent)", borderRadius: 4 }}>
-          {searchError}
+        <div style={{ fontSize: 12, color: "var(--danger)", padding: "8px 10px", background: "color-mix(in srgb, var(--danger) 10%, transparent)", borderRadius: 4, display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <span className="selectable" style={{ flex: 1, userSelect: "text", lineHeight: 1.5 }}>{searchError}</span>
+          <button
+            onClick={() => navigator.clipboard.writeText(searchError)}
+            title="Copy error"
+            style={{ background: "transparent", color: "var(--danger)", padding: "0 4px", fontSize: 11, flexShrink: 0, opacity: 0.7, border: "1px solid color-mix(in srgb, var(--danger) 30%, transparent)", borderRadius: 3 }}
+          >⎘</button>
         </div>
       )}
 
@@ -465,11 +516,6 @@ function SnovPanel({
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>
               {prospects.length} RECRUITERS FOUND — select to add
-              {sourceUsed && (
-                <span style={{ marginLeft: 6, padding: "1px 7px", borderRadius: 10, background: "color-mix(in srgb, var(--primary) 12%, var(--surface2))", color: "var(--primary)", fontSize: 10, fontWeight: 600 }}>
-                  via {sourceUsed}
-                </span>
-              )}
             </span>
             <div style={{ display: "flex", gap: 6 }}>
               <button

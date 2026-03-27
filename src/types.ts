@@ -64,6 +64,10 @@ export interface AppConfig {
   apollo_api_key: string;
   hunter_api_key: string;
   prospeo_api_key: string;
+  snov_enabled: boolean;
+  hunter_enabled: boolean;
+  prospeo_enabled: boolean;
+  apollo_enabled: boolean;
   snov_client_id: string;
   snov_client_secret: string;
   n8n_webhook_url: string;
