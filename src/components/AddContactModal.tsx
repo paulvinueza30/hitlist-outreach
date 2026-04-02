@@ -53,10 +53,6 @@ function extractDomain(input: string): { domain: string; companySlug: string } {
   }
 }
 
-function isLinkedInCompanyUrl(s: string) {
-  return s.includes("linkedin.com/company/");
-}
-
 type Mode = "snov" | "manual";
 
 const API_META: Record<string, { cmd: string; label: string }> = {
@@ -78,15 +74,18 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
   // Snov mode state
   const [jobUrl, setJobUrl] = useState("");
   const [domain, setDomain] = useState("");
+  const [locationFilter, setLocationFilter] = useState("");
   const [companyDisplay, setCompanyDisplay] = useState("");
   const [jobPostingUrl, setJobPostingUrl] = useState("");
   const [jobPostingLabel, setJobPostingLabel] = useState("");
   const [searching, setSearching] = useState(false);
+  const [searchingApi, setSearchingApi] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [prospects, setProspects] = useState<SnovProspect[]>([]);
   const [sourceUsed, setSourceUsed] = useState<string | null>(null);
   const [selectedApi, setSelectedApi] = useState<"auto" | string>("auto");
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [inlineEmails, setInlineEmails] = useState<Record<number, string>>({});
   const [adding, setAdding] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [scrapedCompany, setScrapedCompany] = useState("");
@@ -109,14 +108,17 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
   const resetSnovForm = useCallback(() => {
     setJobUrl("");
     setDomain("");
+    setLocationFilter("");
     setCompanyDisplay("");
     setJobPostingUrl("");
     setJobPostingLabel("");
     setProspects([]);
     setSelected(new Set());
+    setInlineEmails({});
     setSourceUsed(null);
     setScrapedCompany("");
     setSearchError(null);
+    setSearchingApi(null);
   }, []);
 
   const resetManualForm = useCallback(() => {
@@ -165,39 +167,55 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
 
   const handleSearch = useCallback(async () => {
     const d = domain.trim();
-    if (!d) return;
-    if (!d.includes(".")) {
+    const loc = locationFilter.trim() || null;
+
+    if (!d && !loc) {
+      setSearchError("Enter a company domain or location to search.");
+      return;
+    }
+    if (d && !d.includes(".") && !loc) {
       setSearchError("Enter the company domain (e.g. riotgames.com) to search.");
       return;
     }
+
     setSearching(true);
     setSearchError(null);
     setProspects([]);
     setSelected(new Set());
+    setInlineEmails({});
     setSourceUsed(null);
+    setSearchingApi(null);
 
-    // Build the list of APIs to try
-    const toTry = selectedApi === "auto"
-      ? enabledApis.map(k => API_META[k]).filter(Boolean)
-      : API_META[selectedApi] ? [API_META[selectedApi]] : [];
+    // Location-only: only Apollo supports searching without a domain
+    const isLocationOnly = !d && !!loc;
+    const toTry = isLocationOnly
+      ? (API_META.apollo && enabledApis.includes("apollo") ? [API_META.apollo] : [])
+      : selectedApi === "auto"
+        ? enabledApis.map(k => API_META[k]).filter(Boolean)
+        : API_META[selectedApi] ? [API_META[selectedApi]] : [];
 
     if (toTry.length === 0) {
-      setSearchError("No APIs configured. Go to Settings → Contact APIs and add at least one key.");
+      if (isLocationOnly) {
+        setSearchError("Location-only search requires Apollo.io. Enable it in Settings → Contact APIs.");
+      } else {
+        setSearchError("No APIs configured. Go to Settings → Contact APIs and add at least one key.");
+      }
       setSearching(false);
       return;
     }
 
     const errors: string[] = [];
     for (const { cmd, label } of toTry) {
+      setSearchingApi(label);
       try {
-        const results = await invoke<SnovProspect[]>(cmd, { domain: d });
+        const results = await invoke<SnovProspect[]>(cmd, { domain: d, location: loc });
         if (results.length > 0) {
           setProspects(results);
           setSourceUsed(label);
           setSearching(false);
+          setSearchingApi(null);
           return;
         }
-        // Empty result — keep trying other APIs in auto mode
         errors.push(`${label}: 0 results`);
       } catch (e) {
         errors.push(`${label}: ${String(e)}`);
@@ -205,10 +223,13 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
     }
 
     setSearchError(
-      `No recruiters found. Tried: ${errors.join(" · ")}`
+      loc && errors.length > 0
+        ? `No recruiters found in "${loc}". Try a broader location or remove it.\n${errors.join(" · ")}`
+        : `No recruiters found. Tried: ${errors.join(" · ")}`
     );
     setSearching(false);
-  }, [domain, selectedApi, enabledApis]);
+    setSearchingApi(null);
+  }, [domain, locationFilter, selectedApi, enabledApis]);
 
   const toggleSelect = (i: number) => {
     setSelected(prev => {
@@ -218,34 +239,49 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
     });
   };
 
+  const toggleSelectAll = () => {
+    if (selected.size === prospects.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(prospects.map((_, i) => i)));
+    }
+  };
+
+  const setInlineEmail = (i: number, val: string) => {
+    setInlineEmails(prev => ({ ...prev, [i]: val }));
+  };
 
   const handleAddSelected = useCallback(async () => {
     if (selected.size === 0) return;
     setAdding(true);
     setSearchError(null);
 
+    // Build working copy with inline emails merged in
+    const updated = prospects.map((p, i) =>
+      inlineEmails[i] ? { ...p, email: inlineEmails[i] } : p
+    );
+
     // Auto-fetch emails for selected prospects that don't have one
-    const updated = [...prospects];
     for (const i of Array.from(selected)) {
       if (!updated[i].email && updated[i].email_start_url) {
         try {
-          let email: string;
+          let fetched: string;
           if (updated[i].source === "prospeo") {
-            email = await invoke<string>("prospeo_fetch_email", { personId: updated[i].email_start_url });
+            fetched = await invoke<string>("prospeo_fetch_email", { personId: updated[i].email_start_url });
           } else {
-            email = await invoke<string>("snov_fetch_email", { emailStartUrl: updated[i].email_start_url });
+            fetched = await invoke<string>("snov_fetch_email", { emailStartUrl: updated[i].email_start_url });
           }
-          updated[i] = { ...updated[i], email };
-        } catch { /* skip, will block below */ }
+          updated[i] = { ...updated[i], email: fetched };
+        } catch { /* skip, will prompt below */ }
       }
     }
     setProspects(updated);
 
-    // Block adding anyone still without email
+    // Block adding contacts still missing email
     const missing = Array.from(selected).filter(i => !updated[i].email);
     if (missing.length > 0) {
       const names = missing.map(i => updated[i].first_name).join(", ");
-      setSearchError(`No email found for: ${names}. Can't add contacts without email.`);
+      setSearchError(`No email for: ${names}. Type one in the email field on their card.`);
       setAdding(false);
       return;
     }
@@ -254,7 +290,6 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
     let dupeCount = 0;
     for (const i of Array.from(selected)) {
       const p = updated[i];
-      // Dupe check
       if (p.email && existingEmails.has(p.email.toLowerCase())) { dupeCount++; continue; }
       if (p.linkedin_url && existingLinkedins.has(p.linkedin_url.toLowerCase())) { dupeCount++; continue; }
       try {
@@ -287,7 +322,7 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
     } else if (dupeCount > 0) {
       setSearchError(`${dupeCount} duplicate(s) skipped.`);
     }
-  }, [selected, prospects, companyDisplay, domain, jobPostingUrl, jobPostingLabel, existingEmails, existingLinkedins, onAdded, resetSnovForm]);
+  }, [selected, prospects, inlineEmails, companyDisplay, domain, jobPostingUrl, jobPostingLabel, existingEmails, existingLinkedins, onAdded, resetSnovForm]);
 
   const handleManualAdd = useCallback(async () => {
     if (!firstName.trim() && !lastName.trim()) return;
@@ -320,10 +355,10 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
       {/* Header */}
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: isPage ? "16px 20px" : "12px 16px",
+        padding: isPage ? "14px 20px" : "10px 16px",
         borderBottom: "1px solid var(--border)", flexShrink: 0,
       }}>
-        <span style={{ fontWeight: 700, fontSize: isPage ? 16 : 14 }}>Add Contacts</span>
+        <span style={{ fontWeight: 700, fontSize: isPage ? 15 : 13 }}>Add Contacts</span>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           {snovConfigured && (
             <div style={{ display: "flex", background: "var(--surface2)", borderRadius: 6, border: "1px solid var(--border)", overflow: "hidden" }}>
@@ -347,11 +382,11 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
       </div>
 
       {successMsg && (
-        <div style={{ padding: "10px 20px", background: "color-mix(in srgb, var(--success) 15%, transparent)", borderBottom: "1px solid color-mix(in srgb, var(--success) 30%, transparent)", color: "var(--success)", fontSize: 12, fontWeight: 600 }}>
+        <div style={{ padding: "8px 20px", background: "color-mix(in srgb, var(--success) 15%, transparent)", borderBottom: "1px solid color-mix(in srgb, var(--success) 30%, transparent)", color: "var(--success)", fontSize: 12, fontWeight: 600 }}>
           {successMsg}
         </div>
       )}
-      <div style={{ flex: 1, overflowY: "auto", padding: isPage ? "16px 20px" : 16 }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: isPage ? "16px 20px" : 14 }}>
           {!snovConfigured && mode === "manual" && (
             <div style={{ marginBottom: 12, padding: "8px 12px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", borderRadius: 6, fontSize: 11, color: "var(--text-muted)" }}>
               Add your Snov.io credentials in <strong>Settings</strong> to enable recruiter search from job postings.
@@ -361,7 +396,7 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
             <>
               {/* API selector */}
               {enabledApis.length > 0 && (
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 10 }}>
                   {(["auto", ...enabledApis] as string[]).map(api => {
                     const label = api === "auto" ? "Auto" : (API_META[api]?.label ?? api);
                     const active = selectedApi === api;
@@ -381,7 +416,7 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
                   })}
                   {sourceUsed && (
                     <span style={{ marginLeft: 4, alignSelf: "center", fontSize: 10, color: "var(--text-muted)" }}>
-                      last result: <strong style={{ color: "var(--primary)" }}>{sourceUsed}</strong>
+                      via <strong style={{ color: "var(--primary)" }}>{sourceUsed}</strong>
                     </span>
                   )}
                 </div>
@@ -389,13 +424,15 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
               <SnovPanel
                 jobUrl={jobUrl} setJobUrl={setJobUrl}
                 domain={domain} setDomain={setDomain}
+                locationFilter={locationFilter} setLocationFilter={setLocationFilter}
                 companyDisplay={companyDisplay} setCompanyDisplay={setCompanyDisplay}
                 scrapedCompany={scrapedCompany}
                 scraping={scraping} onScrape={handleScrapeJobUrl}
-                searching={searching} onSearch={handleSearch}
+                searching={searching} searchingApi={searchingApi} onSearch={handleSearch}
                 searchError={searchError}
                 prospects={prospects}
-                selected={selected} onToggle={toggleSelect}
+                selected={selected} onToggle={toggleSelect} onToggleAll={toggleSelectAll}
+                inlineEmails={inlineEmails} setInlineEmail={setInlineEmail}
                 adding={adding} onAddSelected={handleAddSelected}
               />
             </>
@@ -439,7 +476,7 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
         background: "var(--surface)",
         border: "1px solid var(--border)",
         borderRadius: 10,
-        width: 560,
+        width: 580,
         maxWidth: "95vw",
         maxHeight: "90vh",
         display: "flex",
@@ -456,29 +493,36 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
 // ── Snov Panel ─────────────────────────────────────────────────────────────
 
 function SnovPanel({
-  jobUrl, setJobUrl, domain, setDomain, companyDisplay, setCompanyDisplay,
-  scrapedCompany, scraping, onScrape, searching, onSearch, searchError,
-  prospects, selected, onToggle, adding, onAddSelected,
+  jobUrl, setJobUrl, domain, setDomain,
+  locationFilter, setLocationFilter,
+  companyDisplay, setCompanyDisplay,
+  scrapedCompany, scraping, onScrape, searching, searchingApi, onSearch, searchError,
+  prospects, selected, onToggle, onToggleAll,
+  inlineEmails, setInlineEmail,
+  adding, onAddSelected,
 }: {
   jobUrl: string; setJobUrl: (s: string) => void;
   domain: string; setDomain: (s: string) => void;
+  locationFilter: string; setLocationFilter: (s: string) => void;
   companyDisplay: string; setCompanyDisplay: (s: string) => void;
   scrapedCompany: string;
   scraping: boolean; onScrape: () => void;
-  searching: boolean; onSearch: () => void;
+  searching: boolean; searchingApi: string | null; onSearch: () => void;
   searchError: string | null;
   prospects: SnovProspect[];
-  selected: Set<number>; onToggle: (i: number) => void;
+  selected: Set<number>; onToggle: (i: number) => void; onToggleAll: () => void;
+  inlineEmails: Record<number, string>; setInlineEmail: (i: number, val: string) => void;
   adding: boolean; onAddSelected: () => void;
 }) {
   const selectedCount = selected.size;
+  const allSelected = prospects.length > 0 && selected.size === prospects.length;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Job URL row */}
       <div>
-        <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
-          JOB POSTING URL (optional — auto-extracts company)
+        <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
+          JOB POSTING URL <span style={{ opacity: 0.6 }}>(optional — auto-extracts company)</span>
         </label>
         <div style={{ display: "flex", gap: 6 }}>
           <input
@@ -486,6 +530,7 @@ function SnovPanel({
             placeholder="https://jobs.lever.co/stripe/..."
             value={jobUrl}
             onChange={e => setJobUrl(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && onScrape()}
             style={{ flex: 1, padding: "6px 8px", fontSize: 12 }}
           />
           <button
@@ -498,52 +543,78 @@ function SnovPanel({
         </div>
       </div>
 
-      {/* Company domain row */}
-      <div>
-        <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
-          COMPANY DOMAIN *
-        </label>
-        <div style={{ display: "flex", gap: 6 }}>
+      {/* Domain + Location row */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ flex: 3 }}>
+          <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
+            COMPANY DOMAIN
+          </label>
           <input
             type="text"
             placeholder="riotgames.com"
             value={domain}
             onChange={e => setDomain(e.target.value.trim())}
             onKeyDown={e => e.key === "Enter" && onSearch()}
-            style={{ flex: 1, padding: "6px 8px", fontSize: 12 }}
+            style={{ width: "100%", padding: "6px 8px", fontSize: 12 }}
           />
-          <button
-            onClick={onSearch}
-            disabled={searching || !domain.trim()}
-            style={{ background: "var(--primary)", color: "#fff", padding: "6px 16px", fontSize: 12, fontWeight: 500, flexShrink: 0 }}
-          >
-            {searching ? "Searching…" : "Find Recruiters"}
-          </button>
+        </div>
+        <div style={{ flex: 2 }}>
+          <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
+            LOCATION <span style={{ opacity: 0.6 }}>(optional)</span>
+          </label>
+          <input
+            type="text"
+            placeholder="Austin, TX"
+            value={locationFilter}
+            onChange={e => setLocationFilter(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && onSearch()}
+            style={{ width: "100%", padding: "6px 8px", fontSize: 12 }}
+          />
         </div>
       </div>
 
       {/* Company display name */}
-      <div>
-        <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
-          COMPANY NAME (for contact record)
-        </label>
-        <input
-          type="text"
-          placeholder="Riot Games"
-          value={companyDisplay}
-          onChange={e => setCompanyDisplay(e.target.value)}
-          style={{ width: "100%", padding: "6px 8px", fontSize: 12 }}
-        />
-        {scrapedCompany && (
-          <div style={{ fontSize: 11, color: "var(--success)", marginTop: 4 }}>
-            Detected: {scrapedCompany}
-          </div>
-        )}
-      </div>
+      {(domain || scrapedCompany) && (
+        <div>
+          <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>
+            COMPANY NAME <span style={{ opacity: 0.6 }}>(for contact record)</span>
+          </label>
+          <input
+            type="text"
+            placeholder="Riot Games"
+            value={companyDisplay}
+            onChange={e => setCompanyDisplay(e.target.value)}
+            style={{ width: "100%", padding: "6px 8px", fontSize: 12 }}
+          />
+          {scrapedCompany && (
+            <div style={{ fontSize: 11, color: "var(--success)", marginTop: 3 }}>
+              Detected: {scrapedCompany}
+            </div>
+          )}
+        </div>
+      )}
+
+      <button
+        onClick={onSearch}
+        disabled={searching || (!domain.trim() && !locationFilter.trim())}
+        style={{
+          background: "var(--primary)", color: "#fff",
+          padding: "8px 16px", fontSize: 13, fontWeight: 600,
+          width: "100%", borderRadius: 6,
+          opacity: searching ? 0.7 : 1,
+        }}
+      >
+        {searching
+          ? (searchingApi ? `Searching ${searchingApi}…` : "Searching…")
+          : locationFilter.trim() && !domain.trim()
+            ? `Find Recruiters in ${locationFilter.trim()}`
+            : "Find Recruiters"
+        }
+      </button>
 
       {searchError && (
-        <div style={{ fontSize: 12, color: "var(--danger)", padding: "8px 10px", background: "color-mix(in srgb, var(--danger) 10%, transparent)", borderRadius: 4, display: "flex", alignItems: "flex-start", gap: 8 }}>
-          <span className="selectable" style={{ flex: 1, userSelect: "text", lineHeight: 1.5 }}>{searchError}</span>
+        <div style={{ fontSize: 12, color: "var(--danger)", padding: "8px 10px", background: "color-mix(in srgb, var(--danger) 10%, transparent)", borderRadius: 6, display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <span className="selectable" style={{ flex: 1, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{searchError}</span>
           <button
             onClick={() => navigator.clipboard.writeText(searchError)}
             title="Copy error"
@@ -557,33 +628,39 @@ function SnovPanel({
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>
-              {prospects.length} RECRUITERS FOUND — select to add
+              {prospects.length} RECRUITER{prospects.length !== 1 ? "S" : ""} FOUND
             </span>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button
-                onClick={() => {/* select all handled inline */}}
-                style={{ fontSize: 11, background: "transparent", color: "var(--primary)", padding: 0 }}
-              >
-              </button>
-            </div>
+            <button
+              onClick={onToggleAll}
+              style={{
+                fontSize: 11, background: "transparent",
+                color: allSelected ? "var(--danger)" : "var(--primary)",
+                padding: "2px 6px", border: "1px solid var(--border)", borderRadius: 4,
+              }}
+            >
+              {allSelected ? "Deselect all" : "Select all"}
+            </button>
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 320, overflowY: "auto" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 340, overflowY: "auto" }}>
             {prospects.map((p, i) => {
               const isSelected = selected.has(i);
+              const needsEmail = isSelected && !p.email && !p.email_start_url;
+              const willFetchEmail = isSelected && !p.email && !!p.email_start_url;
               return (
                 <div
                   key={i}
                   onClick={() => onToggle(i)}
                   style={{
                     display: "flex",
-                    alignItems: "center",
+                    alignItems: "flex-start",
                     gap: 8,
                     padding: "8px 10px",
-                    borderRadius: 6,
+                    borderRadius: 7,
                     border: `1px solid ${isSelected ? "var(--primary)" : "var(--border)"}`,
                     background: isSelected ? "color-mix(in srgb, var(--primary) 8%, transparent)" : "var(--surface2)",
                     cursor: "pointer",
+                    transition: "border-color 0.1s, background 0.1s",
                   }}
                 >
                   <input
@@ -591,39 +668,68 @@ function SnovPanel({
                     checked={isSelected}
                     onChange={() => onToggle(i)}
                     onClick={e => e.stopPropagation()}
-                    style={{ flexShrink: 0 }}
+                    style={{ flexShrink: 0, marginTop: 2 }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 500 }}>
+                    {/* Name + seniority */}
+                    <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       {p.first_name} {p.last_name}
                       {p.seniority && (
-                        <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: 5, fontWeight: 400 }}>
+                        <span style={{
+                          fontSize: 10, color: "var(--text-muted)", fontWeight: 400,
+                          background: "var(--surface)", border: "1px solid var(--border)",
+                          borderRadius: 3, padding: "1px 5px",
+                        }}>
                           {p.seniority}
                         </span>
                       )}
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{p.position}</div>
+                    {/* Title */}
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 1 }}>{p.position}</div>
+                    {/* Location */}
                     {(p.city || p.country) && (
-                      <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                        📍 {[p.city, p.country].filter(Boolean).join(", ")}
+                      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, display: "flex", alignItems: "center", gap: 3 }}>
+                        <span style={{ opacity: 0.7 }}>📍</span>
+                        {[p.city, p.country].filter(Boolean).join(", ")}
                       </div>
                     )}
+                    {/* Email status */}
                     {p.email ? (
-                      <div style={{ fontSize: 11, color: "var(--success)" }}>✓ {p.email}</div>
-                    ) : (
-                      <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                        {p.email_start_url ? "email fetched on add" : "no email available"}
+                      <div style={{ fontSize: 11, color: "var(--success)", marginTop: 3 }}>✓ {p.email}</div>
+                    ) : willFetchEmail ? (
+                      <div style={{ fontSize: 11, color: "var(--warning)", marginTop: 3, fontStyle: "italic" }}>
+                        email fetched on add (costs 1 credit)
                       </div>
+                    ) : needsEmail ? (
+                      <div style={{ marginTop: 4 }} onClick={e => e.stopPropagation()}>
+                        <input
+                          type="email"
+                          placeholder="Enter email manually…"
+                          value={inlineEmails[i] || ""}
+                          onChange={e => setInlineEmail(i, e.target.value)}
+                          onClick={e => e.stopPropagation()}
+                          style={{
+                            width: "100%", padding: "4px 7px", fontSize: 11,
+                            border: "1px solid var(--warning)",
+                            background: "color-mix(in srgb, var(--warning) 8%, var(--surface))",
+                            borderRadius: 4,
+                          }}
+                        />
+                        <div style={{ fontSize: 10, color: "var(--warning)", marginTop: 2 }}>No email found — enter manually</div>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3, opacity: 0.6 }}>no email available</div>
                     )}
                   </div>
-                  <div style={{ display: "flex", gap: 4, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+                  {/* LinkedIn button */}
+                  <div style={{ flexShrink: 0, alignSelf: "flex-start", paddingTop: 1 }} onClick={e => e.stopPropagation()}>
                     {p.linkedin_url && (
                       <button
                         onClick={() => invoke("open_viewer_window", { url: p.linkedin_url, title: `${p.first_name} ${p.last_name}` })}
                         title="View LinkedIn profile"
-                        style={{ fontSize: 10, padding: "2px 7px", background: "var(--surface)", border: "1px solid var(--border)", color: "var(--primary)" }}
+                        style={{ fontSize: 10, padding: "2px 7px", background: "var(--surface)", border: "1px solid var(--border)", color: "var(--primary)", borderRadius: 4 }}
                       >
-                        LinkedIn ↗
+                        in ↗
                       </button>
                     )}
                   </div>
@@ -636,16 +742,17 @@ function SnovPanel({
             onClick={onAddSelected}
             disabled={adding || selectedCount === 0}
             style={{
-              marginTop: 12,
+              marginTop: 10,
               width: "100%",
-              padding: "8px 0",
+              padding: "9px 0",
               background: selectedCount > 0 ? "var(--primary)" : "var(--surface2)",
               color: selectedCount > 0 ? "#fff" : "var(--text-muted)",
               fontWeight: 600,
               fontSize: 13,
+              borderRadius: 6,
             }}
           >
-            {adding ? "Adding…" : selectedCount > 0 ? `Add ${selectedCount} contact${selectedCount > 1 ? "s" : ""} to Hitlist` : "Select contacts to add"}
+            {adding ? "Adding…" : selectedCount > 0 ? `Add ${selectedCount} to Hitlist` : "Select contacts to add"}
           </button>
         </div>
       )}
@@ -675,19 +782,19 @@ function ManualPanel({
   adding: boolean; error: string | null; onAdd: () => void;
 }) {
   const row = (label: string, children: React.ReactNode) => (
-    <div style={{ marginBottom: 10 }}>
+    <div style={{ marginBottom: 8 }}>
       <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>{label}</label>
       {children}
     </div>
   );
-  const inp = (val: string, set: (s: string) => void, ph: string) => (
-    <input type="text" value={val} onChange={e => set(e.target.value)} placeholder={ph}
+  const inp = (val: string, set: (s: string) => void, ph: string, type = "text") => (
+    <input type={type} value={val} onChange={e => set(e.target.value)} placeholder={ph}
       style={{ width: "100%", padding: "6px 8px", fontSize: 12 }} />
   );
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <div style={{ flex: 1 }}>
           <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>FIRST NAME *</label>
           <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="Jane"
@@ -699,9 +806,9 @@ function ManualPanel({
             style={{ width: "100%", padding: "6px 8px", fontSize: 12 }} />
         </div>
       </div>
-      {row("EMAIL", inp(email, setEmail, "jane@company.com"))}
+      {row("EMAIL", inp(email, setEmail, "jane@company.com", "email"))}
       {row("JOB TITLE", inp(jobTitle, setJobTitle, "Technical Recruiter"))}
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <div style={{ flex: 1 }}>
           <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>COMPANY</label>
           <input type="text" value={company} onChange={e => setCompany(e.target.value)} placeholder="Stripe"
@@ -714,7 +821,7 @@ function ManualPanel({
         </div>
       </div>
       {row("LINKEDIN URL", inp(linkedinUrl, setLinkedinUrl, "https://linkedin.com/in/..."))}
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <div style={{ flex: 2 }}>
           <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>JOB POSTING URL</label>
           <input type="text" value={jobUrl} onChange={e => setJobUrl(e.target.value)} placeholder="https://..."
@@ -727,12 +834,12 @@ function ManualPanel({
         </div>
       </div>
 
-      {error && <div style={{ color: "var(--danger)", fontSize: 12, marginBottom: 8 }}>{error}</div>}
+      {error && <div style={{ color: "var(--danger)", fontSize: 12, marginBottom: 8, padding: "6px 8px", background: "color-mix(in srgb, var(--danger) 10%, transparent)", borderRadius: 4 }}>{error}</div>}
 
       <button
         onClick={onAdd}
         disabled={adding || (!firstName.trim() && !lastName.trim())}
-        style={{ width: "100%", padding: "8px 0", background: "var(--primary)", color: "#fff", fontWeight: 600, fontSize: 13 }}
+        style={{ width: "100%", padding: "9px 0", background: "var(--primary)", color: "#fff", fontWeight: 600, fontSize: 13, borderRadius: 6 }}
       >
         {adding ? "Adding…" : "Add Contact"}
       </button>

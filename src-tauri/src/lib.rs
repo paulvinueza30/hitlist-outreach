@@ -1488,7 +1488,7 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub async fn hunter_search_prospects(app: AppHandle, domain: String) -> Result<Vec<SnovProspect>, String> {
+    pub async fn hunter_search_prospects(app: AppHandle, domain: String, location: Option<String>) -> Result<Vec<SnovProspect>, String> {
         let key = store_get(&app, "hunter_api_key").ok_or("No Hunter.io API key configured")?;
         let client = Client::new();
 
@@ -1496,7 +1496,7 @@ pub mod commands {
             .query(&[
                 ("domain", domain.as_str()),
                 ("api_key", key.as_str()),
-                ("limit", "10"),
+                ("limit", "20"),
                 ("type", "personal"),
             ])
             .send().await.map_err(|e| format!("Hunter.io request failed: {}", e))?;
@@ -1557,29 +1557,50 @@ pub mod commands {
             })
             .collect();
 
+        // Client-side location filter for Hunter (API doesn't support it)
+        if let Some(loc) = &location {
+            let loc_lower = loc.to_lowercase();
+            if !loc_lower.is_empty() {
+                prospects.retain(|p| {
+                    let city = p.city.as_deref().unwrap_or("").to_lowercase();
+                    let country = p.country.as_deref().unwrap_or("").to_lowercase();
+                    city.contains(&loc_lower) || country.contains(&loc_lower)
+                });
+            }
+        }
+
         prospects.sort_by_key(|p| title_score(&p.position));
         Ok(prospects)
     }
 
     #[tauri::command]
-    pub async fn apollo_search_prospects(app: AppHandle, domain: String) -> Result<Vec<SnovProspect>, String> {
+    pub async fn apollo_search_prospects(app: AppHandle, domain: String, location: Option<String>) -> Result<Vec<SnovProspect>, String> {
         let key = store_get(&app, "apollo_api_key").ok_or("No Apollo.io API key configured")?;
         let client = Client::new();
+
+        let mut body = json!({
+            "api_key": &key,
+            "person_titles": [
+                "recruiter", "technical recruiter", "talent acquisition",
+                "talent acquisition specialist", "talent acquisition manager",
+                "technical sourcer", "senior recruiter", "hr manager", "people operations"
+            ],
+            "page": 1,
+            "per_page": 25
+        });
+        if !domain.is_empty() {
+            body["organization_domains"] = json!([&domain]);
+        }
+        if let Some(loc) = &location {
+            if !loc.is_empty() {
+                body["person_locations"] = json!([loc]);
+            }
+        }
 
         let resp = client.post("https://api.apollo.io/v1/people/search")
             .header("X-Api-Key", &key)
             .header("Content-Type", "application/json")
-            .json(&json!({
-                "api_key": &key,
-                "person_titles": [
-                    "recruiter", "technical recruiter", "talent acquisition",
-                    "talent acquisition specialist", "talent acquisition manager",
-                    "technical sourcer", "senior recruiter", "hr manager", "people operations"
-                ],
-                "organization_domains": [&domain],
-                "page": 1,
-                "per_page": 20
-            }))
+            .json(&body)
             .send().await.map_err(|e| format!("Apollo.io request failed: {}", e))?;
 
         if !resp.status().is_success() {
@@ -1633,7 +1654,7 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub async fn prospeo_search_prospects(app: AppHandle, domain: String) -> Result<Vec<SnovProspect>, String> {
+    pub async fn prospeo_search_prospects(app: AppHandle, domain: String, location: Option<String>) -> Result<Vec<SnovProspect>, String> {
         let key = store_get(&app, "prospeo_api_key").ok_or("No Prospeo API key configured")?;
         let client = Client::new();
 
@@ -1706,12 +1727,24 @@ pub mod commands {
                     email_start_url: id, // person_id stored here for enrich call
                     email: None,
                     source: Some("prospeo".to_string()),
-                    city: None,
-                    country: None,
-                    seniority: None,
+                    city: p["location"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                    country: p["country"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                    seniority: p["seniority"].as_str().filter(|s| !s.is_empty()).map(String::from),
                 })
             })
             .collect();
+
+        // Client-side location filter for Prospeo
+        if let Some(loc) = &location {
+            let loc_lower = loc.to_lowercase();
+            if !loc_lower.is_empty() {
+                prospects.retain(|p| {
+                    let city = p.city.as_deref().unwrap_or("").to_lowercase();
+                    let country = p.country.as_deref().unwrap_or("").to_lowercase();
+                    city.contains(&loc_lower) || country.contains(&loc_lower)
+                });
+            }
+        }
 
         prospects.sort_by_key(|p| title_score(&p.position));
         Ok(prospects)
@@ -2196,6 +2229,7 @@ pub mod commands {
     pub async fn snov_search_prospects(
         app: AppHandle,
         domain: String,  // e.g. "stripe.com"
+        location: Option<String>,
     ) -> Result<Vec<SnovProspect>, String> {
         let client_id = store_get(&app, "snov_client_id")
             .ok_or("No Snov.io Client ID. Add it in Settings.")?;
@@ -2256,6 +2290,18 @@ pub mod commands {
                 Some(SnovProspect { first_name: first, last_name: last, position, linkedin_url: linkedin, email_start_url: email_start, email: None, source: Some("snov".to_string()), city, country, seniority })
             })
             .collect();
+
+        // Client-side location filter for Snov
+        if let Some(loc) = &location {
+            let loc_lower = loc.to_lowercase();
+            if !loc_lower.is_empty() {
+                prospects.retain(|p| {
+                    let city = p.city.as_deref().unwrap_or("").to_lowercase();
+                    let country = p.country.as_deref().unwrap_or("").to_lowercase();
+                    city.contains(&loc_lower) || country.contains(&loc_lower)
+                });
+            }
+        }
 
         prospects.sort_by_key(|p| title_score(&p.position));
         Ok(prospects)
