@@ -99,6 +99,10 @@ pub struct AppConfig {
     pub apollo_api_key: String,
     pub hunter_api_key: String,
     pub prospeo_api_key: String,
+    pub snov_enabled: bool,
+    pub hunter_enabled: bool,
+    pub prospeo_enabled: bool,
+    pub apollo_enabled: bool,
     pub snov_client_id: String,
     pub snov_client_secret: String,
     pub n8n_webhook_url: String,
@@ -940,6 +944,10 @@ pub mod commands {
             apollo_api_key: store_get(&app, "apollo_api_key").unwrap_or_default(),
             hunter_api_key: store_get(&app, "hunter_api_key").unwrap_or_default(),
             prospeo_api_key: store_get(&app, "prospeo_api_key").unwrap_or_default(),
+            snov_enabled: store_get(&app, "snov_enabled").map(|v| v == "true").unwrap_or(true),
+            hunter_enabled: store_get(&app, "hunter_enabled").map(|v| v == "true").unwrap_or(true),
+            prospeo_enabled: store_get(&app, "prospeo_enabled").map(|v| v == "true").unwrap_or(true),
+            apollo_enabled: store_get(&app, "apollo_enabled").map(|v| v == "true").unwrap_or(false),
             snov_client_id: store_get(&app, "snov_client_id").unwrap_or_default(),
             snov_client_secret: store_get(&app, "snov_client_secret").unwrap_or_default(),
             n8n_webhook_url: store_get(&app, "n8n_webhook_url").unwrap_or_default(),
@@ -965,6 +973,10 @@ pub mod commands {
         hunter_api_key: String,
         apollo_api_key: String,
         prospeo_api_key: String,
+        snov_enabled: bool,
+        hunter_enabled: bool,
+        prospeo_enabled: bool,
+        apollo_enabled: bool,
         n8n_webhook_url: String,
         ai_samples_count: usize,
         follow_up_days: usize,
@@ -988,6 +1000,10 @@ pub mod commands {
         if !prospeo_api_key.is_empty() {
             store_set(&app, "prospeo_api_key", &prospeo_api_key)?;
         }
+        store_set(&app, "snov_enabled", if snov_enabled { "true" } else { "false" })?;
+        store_set(&app, "hunter_enabled", if hunter_enabled { "true" } else { "false" })?;
+        store_set(&app, "prospeo_enabled", if prospeo_enabled { "true" } else { "false" })?;
+        store_set(&app, "apollo_enabled", if apollo_enabled { "true" } else { "false" })?;
         store_set(&app, "n8n_webhook_url", &n8n_webhook_url)?;
         store_set(&app, "ai_samples_count", &ai_samples_count.to_string())?;
         store_set(&app, "follow_up_days", &follow_up_days.to_string())?;
@@ -1347,12 +1363,22 @@ pub mod commands {
         linkedin_url: Option<String>,
         job_posting_url: Option<String>,
         job_posting_label: Option<String>,
+        first_name: Option<String>,
+        last_name: Option<String>,
     ) -> Result<(), String> {
         let api_key = store_get(&app, "twenty_api_key")
             .unwrap_or_else(|| DEFAULT_API_KEY.to_string());
 
         let mut data_parts: Vec<String> = Vec::new();
 
+        if first_name.is_some() || last_name.is_some() {
+            let fn_val = first_name.as_deref().unwrap_or("").replace('"', "\\\"");
+            let ln_val = last_name.as_deref().unwrap_or("").replace('"', "\\\"");
+            data_parts.push(format!(
+                r#"name: {{ firstName: "{}", lastName: "{}" }}"#,
+                fn_val, ln_val
+            ));
+        }
         if let Some(ref e) = email {
             if !e.is_empty() {
                 let escaped = e.replace('"', "\\\"");
@@ -1447,7 +1473,7 @@ pub mod commands {
             "prospeo" => {
                 let key = store_get(&app, "prospeo_api_key").ok_or("No Prospeo API key configured")?;
                 let resp = client.get("https://api.prospeo.io/user-information")
-                    .header("X-KEY", &key)
+                    .header("Authorization", format!("Bearer {}", &key))
                     .send().await.map_err(|e| e.to_string())?;
                 let body: Value = resp.json().await.map_err(|e| e.to_string())?;
                 if body["error"].as_bool().unwrap_or(false) {
@@ -1470,7 +1496,7 @@ pub mod commands {
             .query(&[
                 ("domain", domain.as_str()),
                 ("api_key", key.as_str()),
-                ("limit", "20"),
+                ("limit", "10"),
                 ("type", "personal"),
             ])
             .send().await.map_err(|e| format!("Hunter.io request failed: {}", e))?;
@@ -1540,10 +1566,11 @@ pub mod commands {
         let key = store_get(&app, "apollo_api_key").ok_or("No Apollo.io API key configured")?;
         let client = Client::new();
 
-        let resp = client.post("https://api.apollo.io/api/v1/mixed_people/search")
+        let resp = client.post("https://api.apollo.io/v1/people/search")
             .header("X-Api-Key", &key)
             .header("Content-Type", "application/json")
             .json(&json!({
+                "api_key": &key,
                 "person_titles": [
                     "recruiter", "technical recruiter", "talent acquisition",
                     "talent acquisition specialist", "talent acquisition manager",
@@ -1558,6 +1585,9 @@ pub mod commands {
         if !resp.status().is_success() {
             let s = resp.status();
             let t = resp.text().await.unwrap_or_default();
+            if s.as_u16() == 403 {
+                return Err(format!("Apollo.io: The people/search API requires a paid plan. Free plans are limited. Please upgrade at https://app.apollo.io/ or use another API."));
+            }
             return Err(format!("Apollo.io {}: {}", s, &t[..t.len().min(200)]));
         }
 
@@ -1607,21 +1637,39 @@ pub mod commands {
         let key = store_get(&app, "prospeo_api_key").ok_or("No Prospeo API key configured")?;
         let client = Client::new();
 
-        let resp = client.post("https://api.prospeo.io/domain-search")
-            .header("X-KEY", &key)
+        let resp = client.post("https://api.prospeo.io/search-person")
+            .header("Authorization", format!("Bearer {}", &key))
             .header("Content-Type", "application/json")
-            .json(&json!({ "company": &domain, "limit": 25 }))
+            .json(&json!({
+                "filters": {
+                    "company.websites": { "include": [&domain] }
+                },
+                "limit": 25
+            }))
             .send().await.map_err(|e| format!("Prospeo request failed: {}", e))?;
 
         if !resp.status().is_success() {
             let s = resp.status();
             let t = resp.text().await.unwrap_or_default();
-            return Err(format!("Prospeo {}: {}", s, &t[..t.len().min(200)]));
+            if let Ok(body) = serde_json::from_str::<Value>(&t) {
+                if body["error"].as_bool().unwrap_or(false) {
+                    let error_code = body["error_code"].as_str().unwrap_or("");
+                    let message = body["message"].as_str().unwrap_or("");
+                    if error_code == "INVALID_API_KEY" {
+                        return Err(format!("Prospeo: Invalid API key. Please check your API key in Settings → Contact APIs and ensure it's not expired."));
+                    }
+                    return Err(format!("Prospeo: {} (code: {})", message, error_code));
+                }
+            }
+            return Err(format!("Prospeo {}: {}", s.as_u16(), &t[..t.len().min(300)]));
         }
 
         let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if !body["req_status"].as_bool().unwrap_or(true) {
+            return Err(format!("Prospeo: {}", body["error_toast"].as_str().unwrap_or("unknown error")));
+        }
         if body["error"].as_bool().unwrap_or(false) {
-            return Err(format!("Prospeo: {}", body["message"].as_str().unwrap_or("unknown error")));
+            return Err(format!("Prospeo: {}", body["message"].as_str().unwrap_or("API error")));
         }
 
         fn title_score(pos: &str) -> u8 {
@@ -1635,18 +1683,19 @@ pub mod commands {
 
         let recruiter_keywords = ["recruit", "talent", "hr", "people", "hiring", "sourcer"];
 
-        let mut prospects: Vec<SnovProspect> = body["response"]
+        let mut prospects: Vec<SnovProspect> = body["response"]["results"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
             .filter_map(|p| {
+                let id = p["id"].as_str().unwrap_or("").to_string();
                 let first = p["first_name"].as_str().unwrap_or("").to_string();
                 let last = p["last_name"].as_str().unwrap_or("").to_string();
-                let title = p["job_title"].as_str().unwrap_or("").to_string();
-                let email = p["email"]["value"].as_str().filter(|s| !s.is_empty()).map(String::from);
+                let title = p["title"].as_str()
+                    .or_else(|| p["job_title"].as_str())
+                    .unwrap_or("").to_string();
                 let linkedin = p["linkedin_url"].as_str().unwrap_or("").to_string();
-                let seniority = p["seniority"].as_str().filter(|s| !s.is_empty()).map(String::from);
-                if first.is_empty() && last.is_empty() { return None; }
+                if (first.is_empty() && last.is_empty()) || id.is_empty() { return None; }
                 let t_lower = title.to_lowercase();
                 if !recruiter_keywords.iter().any(|k| t_lower.contains(k)) { return None; }
                 Some(SnovProspect {
@@ -1654,18 +1703,54 @@ pub mod commands {
                     last_name: last,
                     position: title,
                     linkedin_url: linkedin,
-                    email_start_url: String::new(),
-                    email,
+                    email_start_url: id, // person_id stored here for enrich call
+                    email: None,
                     source: Some("prospeo".to_string()),
                     city: None,
                     country: None,
-                    seniority,
+                    seniority: None,
                 })
             })
             .collect();
 
         prospects.sort_by_key(|p| title_score(&p.position));
         Ok(prospects)
+    }
+
+    #[tauri::command]
+    pub async fn prospeo_fetch_email(app: AppHandle, person_id: String) -> Result<String, String> {
+        let key = store_get(&app, "prospeo_api_key").ok_or("No Prospeo API key configured")?;
+        let client = Client::new();
+
+        let resp = client.post("https://api.prospeo.io/enrich-person")
+            .header("Authorization", format!("Bearer {}", &key))
+            .header("Content-Type", "application/json")
+            .json(&json!({ "data": { "person_id": &person_id } }))
+            .send().await.map_err(|e| format!("Prospeo enrich request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let t = resp.text().await.unwrap_or_default();
+            if let Ok(body) = serde_json::from_str::<Value>(&t) {
+                if body["error"].as_bool().unwrap_or(false) {
+                    let error_code = body["error_code"].as_str().unwrap_or("");
+                    if error_code == "INVALID_API_KEY" {
+                        return Err(format!("Prospeo: Invalid API key. Please check your API key in Settings → Contact APIs."));
+                    }
+                }
+            }
+            return Err(format!("Prospeo enrich {}: {}", s.as_u16(), &t[..t.len().min(300)]));
+        }
+
+        let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        if !body["req_status"].as_bool().unwrap_or(true) {
+            return Err(format!("Prospeo: {}", body["error_toast"].as_str().unwrap_or("unknown error")));
+        }
+
+        body["response"]["email"].as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .ok_or_else(|| "No email returned by Prospeo".to_string())
     }
 
     #[tauri::command]
@@ -2417,6 +2502,20 @@ pub mod commands {
 
     // ── Scheduled emails ──────────────────────────────────────────────────────
 
+    async fn fire_scheduler_webhook(app: &AppHandle, payload: serde_json::Value) {
+        if let Some(url) = store_get(app, "n8n_webhook_url") {
+            if !url.is_empty() {
+                let client = Client::new();
+                let _ = client
+                    .post(&url)
+                    .json(&payload)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
+            }
+        }
+    }
+
     #[tauri::command]
     pub async fn schedule_email(
         app: AppHandle,
@@ -2449,30 +2548,12 @@ pub mod commands {
         store.set("scheduled_emails", serde_json::to_value(&list).unwrap_or(json!([])));
         store.save().map_err(|e| e.to_string())?;
 
-        // Fire-and-forget to n8n webhook if configured
-        let webhook_url = store_get(&app, "n8n_webhook_url");
-        if let Some(url) = webhook_url {
-            if !url.is_empty() {
-                let payload = json!({
-                    "id": entry.id,
-                    "to": entry.contact_email,
-                    "subject": entry.subject,
-                    "body": entry.body,
-                    "scheduled_at": entry.scheduled_at,
-                    "scheduled_at_iso": unix_to_iso(entry.scheduled_at),
-                    "contact_id": entry.contact_id,
-                    "contact_name": entry.contact_name,
-                    "contact_company": entry.contact_company,
-                });
-                let client = Client::new();
-                let _ = client
-                    .post(&url)
-                    .json(&payload)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await;
-            }
-        }
+        fire_scheduler_webhook(&app, json!({
+            "to": entry.contact_email,
+            "subject": entry.subject,
+            "body": entry.body,
+            "scheduled_at": entry.scheduled_at,
+        })).await;
 
         Ok(entry)
     }
@@ -2513,8 +2594,8 @@ pub mod commands {
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
         if let Some(entry) = list.iter_mut().find(|e| e.id == id) {
-            entry.subject = subject;
-            entry.body = body;
+            entry.subject = subject.clone();
+            entry.body = body.clone();
             entry.scheduled_at = scheduled_at;
         }
         store.set("scheduled_emails", serde_json::to_value(&list).unwrap_or(json!([])));
@@ -2532,16 +2613,15 @@ pub mod commands {
         }
         let now = unix_now();
         let payload = json!({
+            "action": "create",
             "id": format!("test-{}", now),
-            "to": "paulvinueza30@gmail.com",
-            "subject": "Hitlist n8n webhook test",
-            "body": "This is a test email sent by the Hitlist app to confirm your n8n webhook is working correctly.",
-            "scheduled_at": now + 60,
-            "scheduled_at_iso": unix_to_iso(now + 60),
             "contact_id": "test",
             "contact_name": "Paul Vinueza",
             "contact_email": "paulvinueza30@gmail.com",
-            "contact_company": null
+            "contact_company": null,
+            "subject": "Hitlist n8n webhook test",
+            "body": "This is a test email sent by the Hitlist app to confirm your n8n webhook is working correctly.",
+            "scheduled_at": now + 60,
         });
         let client = Client::new();
         let resp = client
@@ -2910,6 +2990,7 @@ pub fn run() {
             commands::hunter_search_prospects,
             commands::apollo_search_prospects,
             commands::prospeo_search_prospects,
+            commands::prospeo_fetch_email,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

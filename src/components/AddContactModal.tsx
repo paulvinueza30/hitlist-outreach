@@ -104,6 +104,34 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
   const [manualAdding, setManualAdding] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
 
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const resetSnovForm = useCallback(() => {
+    setJobUrl("");
+    setDomain("");
+    setCompanyDisplay("");
+    setJobPostingUrl("");
+    setJobPostingLabel("");
+    setProspects([]);
+    setSelected(new Set());
+    setSourceUsed(null);
+    setScrapedCompany("");
+    setSearchError(null);
+  }, []);
+
+  const resetManualForm = useCallback(() => {
+    setFirstName("");
+    setLastName("");
+    setEmail("");
+    setJobTitle("");
+    setManualCompany("");
+    setManualDomain("");
+    setLinkedinUrl("");
+    setManualJobUrl("");
+    setManualJobLabel("");
+    setManualError(null);
+  }, []);
+
   const handleScrapeJobUrl = useCallback(async () => {
     if (!jobUrl.trim()) return;
     setScraping(true);
@@ -251,9 +279,15 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
       setSearchError(`All ${dupeCount} selected contact(s) already exist in your hitlist.`);
       return;
     }
-    if (dupeCount > 0) setSearchError(`${dupeCount} duplicate(s) skipped.`);
-    if (added.length > 0) onAdded(added);
-  }, [selected, prospects, companyDisplay, domain, jobPostingUrl, jobPostingLabel, existingEmails, existingLinkedins, onAdded]);
+    if (added.length > 0) {
+      onAdded(added);
+      resetSnovForm();
+      setSuccessMsg(`✓ ${added.length} contact${added.length > 1 ? "s" : ""} added${dupeCount > 0 ? ` (${dupeCount} duplicate${dupeCount > 1 ? "s" : ""} skipped)` : ""}!`);
+      setTimeout(() => setSuccessMsg(null), 4000);
+    } else if (dupeCount > 0) {
+      setSearchError(`${dupeCount} duplicate(s) skipped.`);
+    }
+  }, [selected, prospects, companyDisplay, domain, jobPostingUrl, jobPostingLabel, existingEmails, existingLinkedins, onAdded, resetSnovForm]);
 
   const handleManualAdd = useCallback(async () => {
     if (!firstName.trim() && !lastName.trim()) return;
@@ -272,11 +306,14 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
         jobPostingLabel: manualJobLabel.trim() || null,
       });
       onAdded([person]);
+      resetManualForm();
+      setSuccessMsg(`✓ ${firstName.trim()} ${lastName.trim()} added!`);
+      setTimeout(() => setSuccessMsg(null), 4000);
     } catch (e) {
       setManualError(String(e));
       setManualAdding(false);
     }
-  }, [firstName, lastName, email, jobTitle, manualCompany, manualDomain, linkedinUrl, manualJobUrl, manualJobLabel, onAdded]);
+  }, [firstName, lastName, email, jobTitle, manualCompany, manualDomain, linkedinUrl, manualJobUrl, manualJobLabel, onAdded, resetManualForm]);
 
   const innerContent = (
     <>
@@ -309,6 +346,11 @@ export default function AddContactModal({ onClose, onAdded, snovConfigured, enab
         </div>
       </div>
 
+      {successMsg && (
+        <div style={{ padding: "10px 20px", background: "color-mix(in srgb, var(--success) 15%, transparent)", borderBottom: "1px solid color-mix(in srgb, var(--success) 30%, transparent)", color: "var(--success)", fontSize: 12, fontWeight: 600 }}>
+          {successMsg}
+        </div>
+      )}
       <div style={{ flex: 1, overflowY: "auto", padding: isPage ? "16px 20px" : 16 }}>
           {!snovConfigured && mode === "manual" && (
             <div style={{ marginBottom: 12, padding: "8px 12px", background: "color-mix(in srgb, var(--warning) 12%, transparent)", borderRadius: 6, fontSize: 11, color: "var(--text-muted)" }}>

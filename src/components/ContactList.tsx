@@ -38,7 +38,7 @@ function dotColor(p: Person, states: Record<string, string>): string {
 export default function ContactList({ contacts, selected, loading, onSelect, contactStates, onAddContact }: Props) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("pending");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("default");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("recent");
   const [kbIdx, setKbIdx] = useState(-1);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
 

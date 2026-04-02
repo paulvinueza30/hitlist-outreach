@@ -25,7 +25,7 @@ interface Props {
   onStartAuth: () => Promise<void>;
   onGenerateEmail: (params: GenerateEmailParams) => Promise<GeneratedEmail>;
   onSetContactState: (id: string, state: string) => Promise<void>;
-  onUpdateContact: (id: string, fields: { email?: string; linkedinUrl?: string; jobPostingUrl?: string; jobPostingLabel?: string }) => Promise<void>;
+  onUpdateContact: (id: string, fields: { email?: string; linkedinUrl?: string; jobPostingUrl?: string; jobPostingLabel?: string; firstName?: string; lastName?: string }) => Promise<void>;
   onDeleteContact: (id: string) => Promise<void>;
 }
 
@@ -91,10 +91,11 @@ export default function ContactDetail({
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [expandedThread, setExpandedThread] = useState<string | null>(null);
-  const [expandedMessages, setExpandedMessages] = useState<Set<string>>(new Set());
 
   // Edit mode for contact fields
   const [editing, setEditing] = useState(false);
+  const [editFirstName, setEditFirstName] = useState("");
+  const [editLastName, setEditLastName] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [editLinkedin, setEditLinkedin] = useState("");
   const [editJobUrl, setEditJobUrl] = useState("");
@@ -163,7 +164,6 @@ export default function ContactDetail({
     setBody("");
     setSendError(null);
     setExpandedThread(null);
-    setExpandedMessages(new Set());
     setJobContext("");
     setLinkedinContext("");
     setContactNote("");
@@ -203,6 +203,13 @@ export default function ContactDetail({
       .then((note) => setContactNote(note || ""))
       .catch(() => {});
   }, [contact?.id]);
+
+  // Auto-expand first thread when threads load
+  useEffect(() => {
+    if (threads.length > 0) {
+      setExpandedThread(threads[0].id);
+    }
+  }, [threads]);
 
   // Auto-resize body textarea
   useEffect(() => {
@@ -503,6 +510,8 @@ export default function ContactDetail({
   };
 
   const handleStartEdit = () => {
+    setEditFirstName(contact.name.firstName);
+    setEditLastName(contact.name.lastName);
     setEditEmail(email);
     setEditLinkedin(linkedinUrl || "");
     setEditJobUrl(jobUrl || "");
@@ -515,7 +524,10 @@ export default function ContactDetail({
     setEditSaving(true);
     setEditError(null);
     try {
+      const nameChanged = editFirstName !== contact.name.firstName || editLastName !== contact.name.lastName;
       await onUpdateContact(contact.id, {
+        firstName: nameChanged ? editFirstName : undefined,
+        lastName: nameChanged ? editLastName : undefined,
         email: editEmail !== email ? editEmail : undefined,
         linkedinUrl: editLinkedin !== linkedinUrl ? editLinkedin : undefined,
         jobPostingUrl: editJobUrl !== jobUrl ? editJobUrl : undefined,
@@ -680,6 +692,26 @@ export default function ContactDetail({
               Edit Contact Fields
             </div>
             <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "flex", gap: 6 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>First Name</label>
+                  <input
+                    type="text"
+                    value={editFirstName}
+                    onChange={(e) => setEditFirstName(e.target.value)}
+                    style={{ width: "100%", padding: "5px 8px", fontSize: 12 }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>Last Name</label>
+                  <input
+                    type="text"
+                    value={editLastName}
+                    onChange={(e) => setEditLastName(e.target.value)}
+                    style={{ width: "100%", padding: "5px 8px", fontSize: 12 }}
+                  />
+                </div>
+              </div>
               <div>
                 <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 3 }}>Email</label>
                 <input
@@ -1028,10 +1060,6 @@ export default function ContactDetail({
                           <div style={{ borderTop: "1px solid var(--border)" }}>
                             {thread.messages.map((msg) => {
                               const msgBody = msg.body ? cleanText(msg.body) : cleanText(msg.snippet);
-                              const isLong = msgBody.length > 400;
-                              const isMsgExpanded = expandedMessages.has(msg.id);
-                              const displayBody =
-                                isLong && !isMsgExpanded ? msgBody.slice(0, 400) : msgBody;
                               return (
                                 <div
                                   key={msg.id}
@@ -1085,49 +1113,7 @@ export default function ContactDetail({
                                         wordBreak: "break-word",
                                       }}
                                     >
-                                      {displayBody}
-                                      {isLong && !isMsgExpanded && (
-                                        <>
-                                          {"… "}
-                                          <button
-                                            onClick={() =>
-                                              setExpandedMessages((prev) => new Set([...prev, msg.id]))
-                                            }
-                                            style={{
-                                              background: "transparent",
-                                              color: "var(--primary)",
-                                              padding: 0,
-                                              fontSize: 11,
-                                              textDecoration: "underline",
-                                            }}
-                                          >
-                                            Show more
-                                          </button>
-                                        </>
-                                      )}
-                                      {isLong && isMsgExpanded && (
-                                        <>
-                                          {" "}
-                                          <button
-                                            onClick={() =>
-                                              setExpandedMessages((prev) => {
-                                                const s = new Set(prev);
-                                                s.delete(msg.id);
-                                                return s;
-                                              })
-                                            }
-                                            style={{
-                                              background: "transparent",
-                                              color: "var(--text-muted)",
-                                              padding: 0,
-                                              fontSize: 11,
-                                              textDecoration: "underline",
-                                            }}
-                                          >
-                                            Show less
-                                          </button>
-                                        </>
-                                      )}
+                                      {msgBody}
                                     </div>
                                   )}
                                 </div>
@@ -1329,6 +1315,7 @@ export default function ContactDetail({
                           ref={bodyRef}
                           placeholder="Write your message…"
                           value={body}
+                          spellCheck={true}
                           onChange={(e) => {
                             setBody(e.target.value);
                             e.target.style.height = "auto";

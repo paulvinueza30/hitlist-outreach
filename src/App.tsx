@@ -151,6 +151,12 @@ export default function App() {
       try {
         const t = await invoke<EmailThread[]>("get_email_threads", { email });
         setThreads(t);
+        if (t.length > 0 && !person.contacted && contactStates[person.id] !== "failed") {
+          // Auto-mark contacted if threads exist (emailed outside app)
+          await invoke("mark_contacted", { id: person.id }).catch(() => {});
+          setContacts((prev) => prev.map((p) => (p.id === person.id ? { ...p, contacted: true } : p)));
+          setSelectedContact((prev) => (prev?.id === person.id ? { ...prev, contacted: true } : prev));
+        }
         const hasReply = t.some((thread) => thread.messages.length > 1);
         if (hasReply && contactStates[person.id] !== "failed") {
           setContactState(person.id, "replied");
@@ -233,7 +239,7 @@ export default function App() {
   const updateContact = useCallback(
     async (
       id: string,
-      fields: { email?: string; linkedinUrl?: string; jobPostingUrl?: string; jobPostingLabel?: string }
+      fields: { email?: string; linkedinUrl?: string; jobPostingUrl?: string; jobPostingLabel?: string; firstName?: string; lastName?: string }
     ) => {
       await invoke("update_person_fields", {
         id,
@@ -241,6 +247,8 @@ export default function App() {
         linkedinUrl: fields.linkedinUrl ?? null,
         jobPostingUrl: fields.jobPostingUrl ?? null,
         jobPostingLabel: fields.jobPostingLabel ?? null,
+        firstName: fields.firstName ?? null,
+        lastName: fields.lastName ?? null,
       });
       // Update local React state
       setContacts((prev) =>
@@ -248,6 +256,9 @@ export default function App() {
           if (p.id !== id) return p;
           return {
             ...p,
+            name: (fields.firstName !== undefined || fields.lastName !== undefined)
+              ? { firstName: fields.firstName ?? p.name.firstName, lastName: fields.lastName ?? p.name.lastName }
+              : p.name,
             emails: fields.email ? { primaryEmail: fields.email } : p.emails,
             linkedinLink: fields.linkedinUrl ? { primaryLinkUrl: fields.linkedinUrl } : p.linkedinLink,
             jobPosting: fields.jobPostingUrl
@@ -260,6 +271,9 @@ export default function App() {
         if (!prev || prev.id !== id) return prev;
         return {
           ...prev,
+          name: (fields.firstName !== undefined || fields.lastName !== undefined)
+            ? { firstName: fields.firstName ?? prev.name.firstName, lastName: fields.lastName ?? prev.name.lastName }
+            : prev.name,
           emails: fields.email ? { primaryEmail: fields.email } : prev.emails,
           linkedinLink: fields.linkedinUrl ? { primaryLinkUrl: fields.linkedinUrl } : prev.linkedinLink,
           jobPosting: fields.jobPostingUrl
@@ -536,45 +550,47 @@ export default function App() {
         <StatsView log={outreachLog} contacts={contacts} contactStates={contactStates} />
       ) : view === "schedule" ? (
         <ScheduleView />
-      ) : view === "add" ? (
-        <AddContactModal
-          isPage
-          onClose={() => setView("contacts")}
-          onAdded={(newPeople) => {
-            setContacts((prev) => [...prev, ...newPeople]);
-            setView("contacts");
-          }}
-          snovConfigured={snovConfigured}
-          enabledApis={enabledApis}
-          existingContacts={contacts}
-        />
       ) : (
-        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-          <ContactList
-            contacts={contacts}
-            selected={selectedContact}
-            loading={loading}
-            onSelect={selectContact}
-            contactStates={contactStates}
-            onAddContact={() => setView("add")}
-          />
-          <ContactDetail
-            contact={selectedContact}
-            threads={threads}
-            threadsLoading={threadsLoading}
-            gmailConnected={config?.gmail_connected ?? false}
-            aiConfigured={aiConfigured}
-            onSendEmail={sendEmail}
-            onEmailSent={onEmailSent}
-            onStartAuth={startGmailAuth}
-            onGenerateEmail={generateEmail}
-            contactState={selectedContact ? (contactStates[selectedContact.id] ?? "") : ""}
-            followUpDays={config?.follow_up_days ?? 7}
-            onSetContactState={setContactState}
-            onUpdateContact={updateContact}
-            onDeleteContact={deleteContact}
-          />
-        </div>
+        <>
+          <div style={{ flex: 1, display: view === "add" ? "flex" : "none", flexDirection: "column", overflow: "hidden" }}>
+            <AddContactModal
+              isPage
+              onClose={() => setView("contacts")}
+              onAdded={(newPeople) => {
+                setContacts((prev) => [...prev, ...newPeople]);
+              }}
+              snovConfigured={snovConfigured}
+              enabledApis={enabledApis}
+              existingContacts={contacts}
+            />
+          </div>
+          <div style={{ flex: 1, display: view === "contacts" ? "flex" : "none", overflow: "hidden" }}>
+            <ContactList
+              contacts={contacts}
+              selected={selectedContact}
+              loading={loading}
+              onSelect={selectContact}
+              contactStates={contactStates}
+              onAddContact={() => setView("add")}
+            />
+            <ContactDetail
+              contact={selectedContact}
+              threads={threads}
+              threadsLoading={threadsLoading}
+              gmailConnected={config?.gmail_connected ?? false}
+              aiConfigured={aiConfigured}
+              onSendEmail={sendEmail}
+              onEmailSent={onEmailSent}
+              onStartAuth={startGmailAuth}
+              onGenerateEmail={generateEmail}
+              contactState={selectedContact ? (contactStates[selectedContact.id] ?? "") : ""}
+              followUpDays={config?.follow_up_days ?? 7}
+              onSetContactState={setContactState}
+              onUpdateContact={updateContact}
+              onDeleteContact={deleteContact}
+            />
+          </div>
+        </>
       )}
 
       {/* Status bar */}
